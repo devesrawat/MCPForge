@@ -1,6 +1,6 @@
 # MCP Forge
 
-A Rust workspace for `mcp-forge`, a CLI and daemon for managing MCP servers and tool execution.
+A Rust workspace for `mcp-forge`, a CLI and daemon for managing MCP servers and tool execution. Efficiently start/stop MCP servers, audit tool invocations, and securely resolve secrets.
 
 > See `PLAN.md` for the full design, architecture, timeline, risk register, testing strategy, and release plan.
 
