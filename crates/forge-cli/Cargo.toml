@@ -1,0 +1,41 @@
+[package]
+name = "forge-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+autobins = false
+
+[[bin]]
+name = "forge"
+path = "src/main.rs"
+
+[features]
+default = []
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+forge-core = { path = "../forge-core" }
+forge-proxy = { path = "../forge-proxy" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "signal", "fs", "io-util", "process"] }
+axum = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dialoguer = { workspace = true }
+rpassword = { workspace = true }
+keyring = { workspace = true }
+toml = { workspace = true }
+secrecy = { workspace = true }
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "trace"], default-features = false, optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }

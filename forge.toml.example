@@ -1,0 +1,21 @@
+# Example mcp-forge configuration.
+# Copy to forge.toml and adjust. Validate with: `forge add` / `forge init`
+
+[proxy]
+enabled = true
+bind = "127.0.0.1"
+port = 3456
+
+[server.github]
+cmd = "npx -y @modelcontextprotocol/server-github"
+transport = "stdio"
+secret.GH_TOKEN = "env:GITHUB_TOKEN"
+# Optional cost estimate for `forge report` (USD per successful tool call)
+# estimated_cost_per_call_usd = 0.002
+max_calls_per_min = 60
+# max_calls_per_day = 10_000
+
+[server.mock]
+# Local test server (build: cargo build -p forge-mock-mcp)
+cmd = "path/to/target/debug/forge-mock-mcp"
+transport = "stdio"
