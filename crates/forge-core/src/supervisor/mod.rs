@@ -414,8 +414,7 @@ pub fn user_stop_marker_path(server: &str) -> Result<PathBuf> {
 }
 
 pub fn data_dir() -> Result<PathBuf> {
-    let home = env::var("HOME").context("HOME environment variable is not set")?;
-    let path = PathBuf::from(home).join(".forge");
+    let path = forge_home_dir()?;
     fs::create_dir_all(&path)
         .with_context(|| format!("failed to create forge data directory '{}'", path.display()))?;
     Ok(path)
@@ -450,6 +449,11 @@ pub fn logs_dir_path() -> Result<PathBuf> {
 }
 
 fn forge_home_dir() -> Result<PathBuf> {
+    // FORGE_HOME lets tests (and advanced users) redirect all forge data without
+    // touching HOME, which is unsafe to mutate in a multithreaded process.
+    if let Ok(forge_home) = env::var("FORGE_HOME") {
+        return Ok(PathBuf::from(forge_home));
+    }
     let home = env::var("HOME").context("HOME environment variable is not set")?;
     Ok(PathBuf::from(home).join(".forge"))
 }

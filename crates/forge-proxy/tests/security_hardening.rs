@@ -202,6 +202,73 @@ deny_tools = ["admin_*"]
     }
 
     #[tokio::test]
+    async fn rate_limiter_rejects_calls_over_per_minute_quota() {
+        // max_calls_per_min = 1 → token bucket holds exactly one token.
+        // The second immediate call must be rejected with a rate-limit error.
+        let state = make_state(
+            r#"
+[server.local]
+cmd = "true"
+max_calls_per_min = 1
+"#,
+            "local",
+            vec!["ping"],
+        );
+
+        // Share the state across both calls via Arc so the rate-limiter state persists.
+        let router = build_router(state);
+
+        let make_req = || {
+            Request::builder()
+                .method("POST")
+                .uri("/")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "method": "tools/call",
+                        "params": { "name": "local__ping", "arguments": {} },
+                        "id": 1
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        // First call — should succeed.
+        let resp1_bytes = to_bytes(
+            router.clone().oneshot(make_req()).await.unwrap().into_body(),
+            usize::MAX,
+        )
+        .await
+        .unwrap();
+        let resp1: serde_json::Value = serde_json::from_slice(&resp1_bytes).unwrap();
+        assert!(
+            resp1["error"].is_null(),
+            "first call should succeed, got error: {}",
+            resp1["error"]
+        );
+
+        // Second immediate call — must be rate-limited.
+        let resp2_bytes = to_bytes(
+            router.oneshot(make_req()).await.unwrap().into_body(),
+            usize::MAX,
+        )
+        .await
+        .unwrap();
+        let resp2: serde_json::Value = serde_json::from_slice(&resp2_bytes).unwrap();
+        assert!(
+            !resp2["error"].is_null(),
+            "second call should be rate-limited"
+        );
+        let message = resp2["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            message.to_lowercase().contains("rate"),
+            "error should mention rate limit, got: {}",
+            message
+        );
+    }
+
+    #[tokio::test]
     async fn rbac_allow_permits_non_denied_tool() {
         let state = make_state(
             r#"

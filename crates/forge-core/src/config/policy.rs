@@ -1,6 +1,7 @@
 //! Tool allow/deny globs (RBAC-style policy at config time).
 
 use crate::config::{ServerConfig, ValidationError};
+use crate::config::validation::validate_server_name;
 use globset::{Glob, GlobMatcher};
 
 #[derive(Debug)]
@@ -50,11 +51,13 @@ impl RbacPolicy {
     }
 }
 
-/// Validate glob patterns compile for every server.
+/// Validate server names and glob patterns for every server.
 pub fn validate_all_servers(
     servers: &std::collections::HashMap<String, ServerConfig>,
 ) -> Result<(), ValidationError> {
     for (name, cfg) in servers {
+        validate_server_name(name)
+            .map_err(|e| ValidationError(format!("server '{}': {}", name, e)))?;
         RbacPolicy::from_server_config(cfg)
             .map_err(|e| ValidationError(format!("server '{}': {}", name, e)))?;
     }
