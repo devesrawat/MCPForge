@@ -9,7 +9,7 @@ pub mod validation;
 
 pub use policy::{RbacPolicy, validate_all_servers};
 pub use secret::{DefaultSecretResolver, SecretRef, SecretResolver};
-pub use validation::ValidationError;
+pub use validation::{ValidationError, validate_server_name};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

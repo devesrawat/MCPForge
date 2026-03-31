@@ -1,25 +1,27 @@
 use forge_core::config::{ForgeConfig, GuardConfig, ProxyConfig, ServerConfig, Transport};
 use forge_core::supervisor::{Supervisor, data_dir, state_file_path};
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[tokio::test]
 async fn start_all_creates_state_file_for_true_server() {
-    let temp_home = env::temp_dir().join(format!(
+    // Use FORGE_HOME to redirect all forge data to a throwaway temp directory.
+    // This avoids unsafe HOME mutation while keeping the test fully isolated.
+    let temp_forge_home = std::env::temp_dir().join(format!(
         "mcp_forge_test_{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ));
-    let prev_home = env::var_os("HOME");
-    // SAFETY: test mutates process env; no other test thread reads HOME concurrently.
-    unsafe {
-        env::set_var("HOME", &temp_home);
-    }
-    let _ = fs::remove_dir_all(&temp_home);
+    let _ = fs::remove_dir_all(&temp_forge_home);
+
+    // SAFETY: FORGE_HOME is forge-specific and not consulted by any system
+    // library, so mutating it here cannot trigger the undefined behaviour
+    // that makes HOME mutation dangerous.  The unique nanosecond suffix
+    // prevents collisions between parallel test runs.
+    unsafe { std::env::set_var("FORGE_HOME", &temp_forge_home) };
 
     let config = ForgeConfig {
         server: vec![(
@@ -56,14 +58,10 @@ async fn start_all_creates_state_file_for_true_server() {
 
     let data_dir = data_dir().expect("data dir available");
     assert!(data_dir.exists());
-    let logs_dir = data_dir.join("logs");
-    assert!(logs_dir.exists());
+    assert!(data_dir.join("logs").exists());
 
-    let _ = fs::remove_dir_all(&temp_home);
-    unsafe {
-        match &prev_home {
-            Some(h) => env::set_var("HOME", h),
-            None => env::remove_var("HOME"),
-        }
-    }
+    // Cleanup
+    let _ = fs::remove_dir_all(&temp_forge_home);
+    // SAFETY: same as set_var above — FORGE_HOME is forge-private.
+    unsafe { std::env::remove_var("FORGE_HOME") };
 }

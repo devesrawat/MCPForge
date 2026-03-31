@@ -32,15 +32,18 @@ fn get_patterns() -> &'static [Regex] {
     PATTERNS.get_or_init(|| {
         vec![
             // Ignore/disregard previous instructions
-            Regex::new(r"(?i)ignore\s+(all\s+)?previous\s+instructions").unwrap(),
-            Regex::new(r"(?i)disregard\s+(all\s+)?previous").unwrap(),
-            Regex::new(r"(?i)forget\s+(all\s+)?(your\s+)?instructions").unwrap(),
+            // \b prevents matching inside longer words (e.g. "ignoreprevious…" is not a real risk
+            // for these multi-word phrases, but anchoring is cheap and explicit).
+            Regex::new(r"(?i)\bignore\s+(all\s+)?previous\s+instructions").unwrap(),
+            Regex::new(r"(?i)\bdisregard\s+(all\s+)?previous").unwrap(),
+            Regex::new(r"(?i)\bforget\s+(all\s+)?(your\s+)?instructions").unwrap(),
             // System role injection
-            Regex::new(r"(?i)system:\s*you\s+are").unwrap(),
-            Regex::new(r"(?i)you\s+are\s+now\s+").unwrap(),
-            Regex::new(r"(?i)act\s+as\s+(a|an)\s+").unwrap(),
+            Regex::new(r"(?i)\bsystem:\s*you\s+are").unwrap(),
+            Regex::new(r"(?i)\byou\s+are\s+now\s+").unwrap(),
+            // \b before "act" prevents "interact as a …" or "react as a …" from firing.
+            Regex::new(r"(?i)\bact\s+as\s+(a|an)\s+").unwrap(),
             // New instructions
-            Regex::new(r"(?i)new\s+instructions?:").unwrap(),
+            Regex::new(r"(?i)\bnew\s+instructions?:").unwrap(),
             // XML tag injection
             Regex::new(r"(?i)<\s*/?\s*system\s*>").unwrap(),
             // Hidden instruction markers
