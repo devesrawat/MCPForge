@@ -2,6 +2,7 @@
 
 pub mod audit;
 pub mod config;
+pub mod injection;
 pub mod mcp;
 pub mod protocol;
 pub mod supervisor;
