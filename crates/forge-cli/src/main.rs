@@ -3,7 +3,9 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 mod telemetry;
-use commands::{Add, Audit, Init, Logs, Ls, Remove, Report, Restart, Secret, Start, Status, Stop};
+use commands::{
+    Add, Audit, Check, Init, Logs, Ls, Remove, Report, Restart, Secret, Start, Status, Stop,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "forge")]
@@ -17,6 +19,7 @@ struct Cli {
 enum Commands {
     Add(Add),
     Audit(Audit),
+    Check(Check),
     Init(Init),
     Ls(Ls),
     Remove(Remove),
@@ -45,6 +48,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Add(cmd) => cmd.run(),
         Commands::Audit(cmd) => cmd.run(),
+        Commands::Check(cmd) => cmd.run(),
         Commands::Init(cmd) => cmd.run(),
         Commands::Ls(cmd) => cmd.run(),
         Commands::Remove(cmd) => cmd.run(),

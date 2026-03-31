@@ -137,7 +137,9 @@ impl AuditWriter {
     }
 
     pub fn log(&self, event: AuditEvent) {
-        let _ = self.tx.send(event);
+        if self.tx.send(event).is_err() {
+            tracing::warn!("audit writer channel disconnected — event dropped");
+        }
     }
 }
 
