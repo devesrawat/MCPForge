@@ -83,9 +83,52 @@ pub struct AuditWriter {
 }
 
 impl AuditWriter {
+    /// Read the on-disk schema version and stamp it if this is a fresh database.
+    /// Returns an error if the database was written by a newer version of forge.
+    fn migrate_schema(conn: &Connection) -> Result<()> {
+        let on_disk: Option<i64> =
+            match conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                r.get(0)
+            }) {
+                Ok(v) => Some(v),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => {
+                    return Err(
+                        anyhow!(e).context("failed to read schema_version from audit database")
+                    );
+                }
+            };
+
+        match on_disk {
+            None => {
+                // Fresh database — stamp the current version.
+                conn.execute(
+                    "INSERT INTO schema_version (version) VALUES (?1)",
+                    rusqlite::params![Self::SCHEMA_VERSION],
+                )?;
+            }
+            Some(v) if v > Self::SCHEMA_VERSION => {
+                anyhow::bail!(
+                    "audit database schema version {} is newer than this forge binary ({}); \
+                     upgrade forge or delete the database",
+                    v,
+                    Self::SCHEMA_VERSION
+                );
+            }
+            Some(_) => {
+                // Version matches or is older — no migration needed for v1.
+            }
+        }
+        Ok(())
+    }
+
     pub fn default_path() -> Result<PathBuf> {
         Ok(supervisor::data_dir()?.join("audit.db"))
     }
+
+    /// Current schema version. Bump this whenever the table layout changes and
+    /// add a corresponding migration branch in `migrate_schema`.
+    const SCHEMA_VERSION: i64 = 1;
 
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let db_path = path.as_ref().to_owned();
@@ -94,6 +137,9 @@ impl AuditWriter {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
+             CREATE TABLE IF NOT EXISTS schema_version (
+                 version INTEGER NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS audit_events (
                  id          TEXT PRIMARY KEY,
                  ts          INTEGER NOT NULL,
@@ -108,6 +154,7 @@ impl AuditWriter {
              CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
              CREATE INDEX IF NOT EXISTS idx_audit_server ON audit_events(server);",
         )?;
+        Self::migrate_schema(&conn)?;
 
         let (tx, rx) = channel::<AuditEvent>();
         let db_path_clone = db_path.clone();
@@ -137,7 +184,9 @@ impl AuditWriter {
     }
 
     pub fn log(&self, event: AuditEvent) {
-        let _ = self.tx.send(event);
+        if self.tx.send(event).is_err() {
+            tracing::warn!("audit writer channel disconnected — event dropped");
+        }
     }
 }
 

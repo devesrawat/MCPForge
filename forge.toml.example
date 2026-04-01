@@ -6,6 +6,10 @@ enabled = true
 bind = "127.0.0.1"
 port = 3456
 
+[guard]
+enabled = true
+injection_mode = "block"
+
 [server.github]
 cmd = "npx -y @modelcontextprotocol/server-github"
 transport = "stdio"

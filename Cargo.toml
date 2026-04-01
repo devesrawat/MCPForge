@@ -7,6 +7,21 @@ members = [
     "crates/forge-mock-mcp",
 ]
 
+[workspace.metadata.dist]
+cargo-dist-version = "0.28.0"
+ci = "github"
+installers = ["shell", "homebrew"]
+tap = "devesrawat/mcp-forge"
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+pr-run-mode = "plan"
+allow-dirty = ["ci"]
+
 [workspace.dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
@@ -25,6 +40,7 @@ tokio = { version = "1", features = ["rt", "macros", "process", "signal", "time"
 tokio-util = "0.7"
 axum = "0.8"
 tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.5", features = ["timeout", "limit"] }
 hyper = "1"
 shell-words = "1.1"
 rusqlite = { version = "0.39", features = ["bundled"] }
@@ -32,6 +48,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
 hex = "0.4"
+regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 governor = "0.10"
@@ -46,4 +63,5 @@ rmcp = { version = "1.3", default-features = false, features = [
 ] }
 tempfile = "3"
 proptest = "1"
+which = "6"
 

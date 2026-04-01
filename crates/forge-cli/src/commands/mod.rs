@@ -1,5 +1,6 @@
 pub mod add;
 pub mod audit;
+pub mod check;
 pub mod init;
 pub mod logs;
 pub mod ls;
@@ -13,6 +14,7 @@ pub mod stop;
 
 pub use add::Add;
 pub use audit::Audit;
+pub use check::Check;
 pub use init::Init;
 pub use logs::Logs;
 pub use ls::Ls;

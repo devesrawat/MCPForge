@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Args;
-use forge_core::config::{ForgeConfig, ServerConfig, Transport};
+use forge_core::config::{ForgeConfig, ServerConfig, Transport, validate_server_name};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -25,6 +25,8 @@ impl Add {
                 proxy: Default::default(),
             }
         };
+
+        validate_server_name(&self.name).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         if cfg.server.contains_key(&self.name) {
             anyhow::bail!("server '{}' already exists in forge.toml", self.name);
