@@ -297,6 +297,7 @@ fn insert_batch(conn: &mut Connection, batch: &[AuditEvent]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -307,14 +308,23 @@ mod tests {
         let writer = AuditWriter::new(&db_path).expect("failed to create writer");
         let event = AuditEvent::new("local", "build", &Value::Null, 0, 123, None, None);
         writer.log(event.clone());
-
-        // allow the writer thread to flush
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(writer);
 
         let reader = AuditReader::open(&db_path).expect("failed to open reader");
-        let events = reader
-            .query_events(AuditQuery::default(), Some(10))
-            .expect("failed to query events");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let events = loop {
+            let events = reader
+                .query_events(AuditQuery::default(), Some(10))
+                .expect("failed to query events");
+            if !events.is_empty() {
+                break events;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for audit writer flush"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        };
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].server, "local");
