@@ -40,7 +40,7 @@ tokio = { version = "1", features = ["rt", "macros", "process", "signal", "time"
 tokio-util = "0.7"
 axum = "0.8"
 tower = { version = "0.5", features = ["full"] }
-tower-http = { version = "0.5", features = ["timeout", "limit"] }
+tower-http = { version = "0.6", features = ["timeout", "limit"] }
 hyper = "1"
 shell-words = "1.1"
 rusqlite = { version = "0.39", features = ["bundled"] }
