@@ -209,11 +209,17 @@ pub fn build_router(state: ProxyAppState) -> Router {
 async fn handle_well_known(State(state): State<ProxyAppState>) -> impl IntoResponse {
     let mut servers = Vec::new();
 
+    // Map wildcard bind addresses to localhost so clients receive a connectable URL.
+    let host = match state.config.proxy.bind.as_str() {
+        "0.0.0.0" | "::" => "localhost",
+        h => h,
+    };
+
     for (name, config) in &state.config.server {
         let server_info = json!({
             "name": name,
             "transport": "http",
-            "endpoint": format!("http://localhost:{}/", state.config.proxy.port),
+            "endpoint": format!("http://{}:{}/", host, state.config.proxy.port),
             "tags": config.tags,
         });
         servers.push(server_info);
