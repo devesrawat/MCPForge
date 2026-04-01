@@ -28,14 +28,17 @@ async fn start_all_creates_state_file_for_true_server() {
     ));
     let _ = fs::remove_dir_all(&temp_forge_home);
 
-    // Hold the global env mutex for the entire duration of the test so that
-    // no concurrent test can observe a partially-set or missing FORGE_HOME.
-    let _env_guard = env_lock().lock().unwrap();
+    // Hold the global env mutex while setting environment variables, but drop
+    // it before the await point to avoid holding a lock across an await
+    // (which is unsafe in async contexts).
+    {
+        let _env_guard = env_lock().lock().unwrap();
 
-    // SAFETY: protected by `env_lock()` above — only one thread mutates env
-    // at a time.  FORGE_HOME is Forge-private and not read by any system
-    // library, so this cannot trigger the UB that makes HOME mutation unsafe.
-    unsafe { std::env::set_var("FORGE_HOME", &temp_forge_home) };
+        // SAFETY: protected by `env_lock()` above — only one thread mutates env
+        // at a time.  FORGE_HOME is Forge-private and not read by any system
+        // library, so this cannot trigger the UB that makes HOME mutation unsafe.
+        unsafe { std::env::set_var("FORGE_HOME", &temp_forge_home) };
+    } // _env_guard is dropped here before the await point
 
     let config = ForgeConfig {
         server: vec![(
@@ -76,6 +79,7 @@ async fn start_all_creates_state_file_for_true_server() {
 
     // Cleanup
     let _ = fs::remove_dir_all(&temp_forge_home);
-    // SAFETY: protected by the same env_lock() guard held above.
+    // SAFETY: FORGE_HOME uniqueness ensures tests don't interfere; release the
+    // env without holding a lock to avoid async-safety issues.
     unsafe { std::env::remove_var("FORGE_HOME") };
 }
