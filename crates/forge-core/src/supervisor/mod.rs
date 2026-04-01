@@ -455,7 +455,11 @@ fn forge_home_dir() -> Result<PathBuf> {
     // FORGE_HOME lets tests (and advanced users) redirect all forge data without
     // touching HOME, which is unsafe to mutate in a multithreaded process.
     if let Ok(forge_home) = env::var("FORGE_HOME") {
-        return Ok(PathBuf::from(forge_home));
+        let trimmed = forge_home.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+        // Empty or whitespace-only FORGE_HOME is treated as unset; fall back to HOME.
     }
     let home = env::var("HOME").context("HOME environment variable is not set")?;
     Ok(PathBuf::from(home).join(".forge"))
