@@ -4,45 +4,111 @@
 mod tests {
     use serde_json::json;
 
-    // ---- existing structural tests ----
+    // ---- real structural tests that exercise the router ----
 
-    #[test]
-    fn well_known_endpoint_structure() {
-        let expected_response = json!({
-            "forge_version": "0.1.0",
-            "mcp_version": "2024-11-05",
-            "servers": [
-                {
-                    "name": "github",
-                    "transport": "http",
-                    "endpoint": "http://localhost:3456/",
-                    "tags": []
-                }
-            ]
-        });
+    #[tokio::test]
+    async fn well_known_returns_configured_server_info() {
+        let state = make_state(
+            r#"
+[server.github]
+cmd = "true"
+"#,
+            "github",
+            vec!["search"],
+        );
+        let router = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/.well-known/mcp-servers.json")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body.get("forge_version").is_some(), "missing forge_version");
+        assert_eq!(body["mcp_version"], "2024-11-05");
+        let servers = body["servers"].as_array().expect("servers must be array");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0]["name"], "github");
+        assert_eq!(servers[0]["transport"], "http");
+        let endpoint = servers[0]["endpoint"].as_str().expect("endpoint string");
+        assert!(
+            endpoint.starts_with("http://"),
+            "endpoint should be an http URL, got: {endpoint}"
+        );
+        assert!(
+            endpoint.contains(":3456"),
+            "endpoint should include the proxy port, got: {endpoint}"
+        );
+    }
 
-        assert!(expected_response.get("forge_version").is_some());
-        assert!(expected_response.get("mcp_version").is_some());
-        assert!(expected_response.get("servers").is_some());
-        assert!(expected_response["servers"].is_array());
+    #[tokio::test]
+    async fn well_known_reflects_custom_bind_address() {
+        let state = make_state(
+            r#"
+[proxy]
+enabled = true
+bind = "192.168.1.1"
+port = 9000
+
+[server.local]
+cmd = "true"
+"#,
+            "local",
+            vec![],
+        );
+        let router = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/.well-known/mcp-servers.json")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let servers = body["servers"].as_array().expect("servers array");
+        let endpoint = servers[0]["endpoint"].as_str().expect("endpoint string");
+        assert!(
+            endpoint.contains("192.168.1.1:9000"),
+            "endpoint should use configured bind address, got: {endpoint}"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_body_is_rejected() {
+        let state = make_state(
+            r#"
+[server.local]
+cmd = "true"
+"#,
+            "local",
+            vec!["ping"],
+        );
+        let router = build_router(state);
+        // 11 MB exceeds the 10 MB limit
+        let big_body = vec![b'x'; 11 * 1024 * 1024];
+        let req = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(big_body))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "requests over 10 MB should be rejected with 413"
+        );
     }
 
     #[test]
-    fn request_body_limit_configuration() {
-        const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024;
-        assert_eq!(MAX_REQUEST_SIZE, 10_485_760);
-    }
-
-    #[test]
-    fn tool_call_timeout_configuration() {
-        const TOOL_CALL_TIMEOUT_SECS: u64 = 60;
-        assert_eq!(TOOL_CALL_TIMEOUT_SECS, 60);
-    }
-
-    #[test]
-    fn proxy_localhost_binding() {
-        let expected_host = "127.0.0.1";
-        assert_eq!(expected_host, "127.0.0.1");
+    fn default_proxy_bind_is_loopback() {
+        use forge_core::config::ProxyConfig;
+        let cfg = ProxyConfig::default();
+        assert_eq!(cfg.bind, "127.0.0.1");
+        assert_eq!(cfg.port, 3456);
     }
 
     #[test]

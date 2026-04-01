@@ -2,7 +2,18 @@ use forge_core::config::{ForgeConfig, GuardConfig, ProxyConfig, ServerConfig, Tr
 use forge_core::supervisor::{Supervisor, data_dir, state_file_path};
 use std::collections::HashMap;
 use std::fs;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Serializes tests that mutate process environment variables.
+/// Even though FORGE_HOME is Forge-specific, `std::env::set_var` is `unsafe`
+/// in Rust ≥ 1.80 because other threads (e.g., the async runtime) may be
+/// reading the environment concurrently.  A global mutex ensures only one test
+/// mutates env at a time.
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[tokio::test]
 async fn start_all_creates_state_file_for_true_server() {
@@ -17,10 +28,13 @@ async fn start_all_creates_state_file_for_true_server() {
     ));
     let _ = fs::remove_dir_all(&temp_forge_home);
 
-    // SAFETY: FORGE_HOME is forge-specific and not consulted by any system
-    // library, so mutating it here cannot trigger the undefined behaviour
-    // that makes HOME mutation dangerous.  The unique nanosecond suffix
-    // prevents collisions between parallel test runs.
+    // Hold the global env mutex for the entire duration of the test so that
+    // no concurrent test can observe a partially-set or missing FORGE_HOME.
+    let _env_guard = env_lock().lock().unwrap();
+
+    // SAFETY: protected by `env_lock()` above — only one thread mutates env
+    // at a time.  FORGE_HOME is Forge-private and not read by any system
+    // library, so this cannot trigger the UB that makes HOME mutation unsafe.
     unsafe { std::env::set_var("FORGE_HOME", &temp_forge_home) };
 
     let config = ForgeConfig {
@@ -62,6 +76,6 @@ async fn start_all_creates_state_file_for_true_server() {
 
     // Cleanup
     let _ = fs::remove_dir_all(&temp_forge_home);
-    // SAFETY: same as set_var above — FORGE_HOME is forge-private.
+    // SAFETY: protected by the same env_lock() guard held above.
     unsafe { std::env::remove_var("FORGE_HOME") };
 }

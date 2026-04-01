@@ -14,8 +14,7 @@ impl Check {
     pub fn run(&self) -> Result<()> {
         let config_path = PathBuf::from("forge.toml");
         if !config_path.exists() {
-            println!("no forge.toml found in current directory");
-            std::process::exit(1);
+            anyhow::bail!("no forge.toml found in current directory");
         }
 
         let config = ForgeConfig::load_from_file(&config_path)
@@ -41,7 +40,11 @@ impl Check {
         );
 
         if error_count > 0 {
-            std::process::exit(1);
+            anyhow::bail!(
+                "check found {} error{}",
+                error_count,
+                if error_count == 1 { "" } else { "s" }
+            );
         }
         Ok(())
     }
