@@ -251,7 +251,10 @@ async fn run_server_loop(
         let pid = match child.id() {
             Some(p) => p,
             None => {
-                let err = anyhow!("failed to get PID for server '{}': process may have already exited", name);
+                let err = anyhow!(
+                    "failed to get PID for server '{}': process may have already exited",
+                    name
+                );
                 let _ = health_tx.send_replace(ServerHealth::Degraded {
                     restarts: restart_count,
                     last_error: err.to_string(),

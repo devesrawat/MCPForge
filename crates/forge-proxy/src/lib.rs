@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{State, DefaultBodyLimit},
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -53,7 +53,7 @@ impl CostGuard {
 
     fn roll_day_if_needed(&self) {
         let today = Self::current_day_key();
-        let prev = self.day.load(Ordering::Relaxed);
+        let prev = self.day.load(Ordering::SeqCst);
         if today != prev
             && self
                 .day
@@ -105,6 +105,8 @@ impl ProxyAppState {
         config: ForgeConfig,
         audit: Option<Arc<AuditWriter>>,
     ) -> anyhow::Result<Self> {
+        let injection_mode = parse_injection_mode(&config.guard.injection_mode)?;
+
         let rate_limiters = Arc::new(DashMap::new());
         for (name, srv) in &config.server {
             let n = NonZeroU32::new(srv.max_calls_per_min.max(1)).unwrap();
@@ -128,8 +130,19 @@ impl ProxyAppState {
             rate_limiters,
             cost_guard: Arc::new(CostGuard::new()),
             policies: Arc::new(policies),
-            injection_detector: Arc::new(InjectionDetector::new(InjectionMode::Warn)),
+            injection_detector: Arc::new(InjectionDetector::new(injection_mode)),
         })
+    }
+}
+
+fn parse_injection_mode(mode: &str) -> anyhow::Result<InjectionMode> {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "warn" => Ok(InjectionMode::Warn),
+        "block" => Ok(InjectionMode::Block),
+        other => Err(anyhow::anyhow!(
+            "invalid guard.injection_mode '{}'; expected 'warn' or 'block'",
+            other
+        )),
     }
 }
 
@@ -193,9 +206,7 @@ pub fn build_router(state: ProxyAppState) -> Router {
         .with_state(state)
 }
 
-async fn handle_well_known(
-    State(state): State<ProxyAppState>,
-) -> impl IntoResponse {
+async fn handle_well_known(State(state): State<ProxyAppState>) -> impl IntoResponse {
     let mut servers = Vec::new();
 
     for (name, config) in &state.config.server {
@@ -319,16 +330,21 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    // Scan arguments for prompt injection
-    if let Some(alert) = state.injection_detector.scan_arguments(&args) {
-        tracing::warn!(
-            matched_pattern = alert.matched_pattern,
-            position = alert.position,
-            "prompt injection detected in tool arguments"
-        );
-        return Err(ProxyError::injection_detected(
-            "Potential prompt injection detected in arguments",
-        ));
+    if state.config.guard.enabled {
+        // Scan arguments for prompt injection
+        if let Some(alert) = state.injection_detector.scan_arguments(&args) {
+            tracing::warn!(
+                matched_pattern = alert.matched_pattern,
+                position = alert.position,
+                "prompt injection detected in tool arguments"
+            );
+
+            if state.injection_detector.mode() == InjectionMode::Block {
+                return Err(ProxyError::injection_detected(
+                    "Potential prompt injection detected in arguments",
+                ));
+            }
+        }
     }
 
     let (server, orig_tool) = forge_core::protocol::parse_namespaced_tool(tool_name)
@@ -336,6 +352,18 @@ async fn handle_tools_call(
 
     if let Some(policy) = state.policies.get(server) {
         if !policy.is_allowed(orig_tool) {
+            if let Some(audit_writer) = &state.audit {
+                let event = AuditEvent::new(
+                    server,
+                    orig_tool,
+                    &args,
+                    -403,
+                    0,
+                    Some("tool blocked by policy".to_owned()),
+                    None,
+                );
+                audit_writer.log(event);
+            }
             return Err(ProxyError::policy_denied(format!(
                 "tool '{}' blocked by policy for server '{}'",
                 orig_tool, server
@@ -343,9 +371,11 @@ async fn handle_tools_call(
         }
     }
 
-    if let Some(lim) = state.rate_limiters.get(server) {
-        if lim.check().is_err() {
-            return Err(ProxyError::rate_limited(server));
+    if state.config.guard.enabled {
+        if let Some(lim) = state.rate_limiters.get(server) {
+            if lim.check().is_err() {
+                return Err(ProxyError::rate_limited(server));
+            }
         }
     }
 
@@ -355,10 +385,12 @@ async fn handle_tools_call(
         .get(server)
         .ok_or_else(|| ProxyError::internal(anyhow::anyhow!("unknown server {}", server)))?;
 
-    state
-        .cost_guard
-        .check(server, srv_cfg.max_calls_per_day)
-        .map_err(ProxyError::internal)?;
+    if state.config.guard.enabled {
+        state
+            .cost_guard
+            .check(server, srv_cfg.max_calls_per_day)
+            .map_err(ProxyError::internal)?;
+    }
 
     let start = Instant::now();
     let result = state.registry.call_tool(tool_name, args.clone()).await;
@@ -369,13 +401,21 @@ async fn handle_tools_call(
     tracing::Span::current().record("tool", orig_tool);
 
     // Scan tool result for indirect prompt injection
-    if let Ok(ref result_value) = result {
-        if let Some(alert) = state.injection_detector.scan_result(result_value) {
-            tracing::warn!(
-                matched_pattern = alert.matched_pattern,
-                position = alert.position,
-                "prompt injection detected in tool result (indirect injection)"
-            );
+    if state.config.guard.enabled {
+        if let Ok(ref result_value) = result {
+            if let Some(alert) = state.injection_detector.scan_result(result_value) {
+                tracing::warn!(
+                    matched_pattern = alert.matched_pattern,
+                    position = alert.position,
+                    "prompt injection detected in tool result (indirect injection)"
+                );
+
+                if state.injection_detector.mode() == InjectionMode::Block {
+                    return Err(ProxyError::injection_detected(
+                        "Potential prompt injection detected in tool result",
+                    ));
+                }
+            }
         }
     }
 
@@ -461,7 +501,10 @@ mod cost_guard_tests {
     fn enforces_exact_daily_limit() {
         let guard = CostGuard::new();
         for _ in 0..5 {
-            assert!(guard.check("svc", Some(5)).is_ok(), "calls within limit should succeed");
+            assert!(
+                guard.check("svc", Some(5)).is_ok(),
+                "calls within limit should succeed"
+            );
         }
         assert!(
             guard.check("svc", Some(5)).is_err(),

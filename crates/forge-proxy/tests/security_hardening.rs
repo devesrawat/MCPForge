@@ -161,7 +161,11 @@ cmd = "true"
             "clean args should reach the tool: {:?}",
             resp
         );
-        assert!(resp["error"].is_null(), "unexpected error: {:?}", resp["error"]);
+        assert!(
+            resp["error"].is_null(),
+            "unexpected error: {:?}",
+            resp["error"]
+        );
     }
 
     #[tokio::test]
@@ -236,7 +240,12 @@ max_calls_per_min = 1
 
         // First call — should succeed.
         let resp1_bytes = to_bytes(
-            router.clone().oneshot(make_req()).await.unwrap().into_body(),
+            router
+                .clone()
+                .oneshot(make_req())
+                .await
+                .unwrap()
+                .into_body(),
             usize::MAX,
         )
         .await

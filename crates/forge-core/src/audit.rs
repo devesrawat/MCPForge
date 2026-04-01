@@ -87,7 +87,9 @@ impl AuditWriter {
     /// Returns an error if the database was written by a newer version of forge.
     fn migrate_schema(conn: &Connection) -> Result<()> {
         let on_disk: Option<i64> = conn
-            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .ok();
 
         match on_disk {

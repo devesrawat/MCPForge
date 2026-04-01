@@ -7,6 +7,21 @@ members = [
     "crates/forge-mock-mcp",
 ]
 
+[workspace.metadata.dist]
+cargo-dist-version = "0.28.0"
+ci = "github"
+installers = ["shell", "homebrew"]
+tap = "devesrawat/mcp-forge"
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+pr-run-mode = "plan"
+allow-dirty = ["ci"]
+
 [workspace.dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
