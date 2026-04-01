@@ -75,13 +75,14 @@ pub fn run_checks(config: &ForgeConfig) -> (usize, usize) {
         }
 
         // Check secrets
-        for (var_name, secret_ref) in &server_config.secret {
+        for (idx, secret_ref) in server_config.secret.values().enumerate() {
+            let n = idx + 1;
             match secret_ref {
                 forge_core::config::SecretRef::Env(var) => {
                     if std::env::var(var).is_ok() {
-                        println!("    [OK] secret '{}' resolves from environment", var_name);
+                        println!("    [OK] env secret #{n} resolves");
                     } else {
-                        println!("    [ERR] secret '{}' environment source not set", var_name);
+                        println!("    [ERR] env secret #{n} source not set");
                         error_count += 1;
                     }
                 }
@@ -89,21 +90,15 @@ pub fn run_checks(config: &ForgeConfig) -> (usize, usize) {
                     match keyring::Entry::new("mcp-forge", key) {
                         Ok(entry) => match entry.get_password() {
                             Ok(_) => {
-                                println!("    [OK] secret '{}' keychain entry exists", var_name)
+                                println!("    [OK] keychain secret #{n} found")
                             }
                             Err(_) => {
-                                println!(
-                                    "    [ERR] secret '{}' keychain entry not found",
-                                    var_name
-                                );
+                                println!("    [ERR] keychain secret #{n} not found");
                                 error_count += 1;
                             }
                         },
                         Err(_) => {
-                            println!(
-                                "    [WARN] keychain unavailable, cannot verify secret '{}'",
-                                var_name
-                            );
+                            println!("    [WARN] keychain unavailable, cannot verify secret #{n}");
                             warning_count += 1;
                         }
                     }
