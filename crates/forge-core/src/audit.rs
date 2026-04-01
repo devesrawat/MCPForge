@@ -86,18 +86,18 @@ impl AuditWriter {
     /// Read the on-disk schema version and stamp it if this is a fresh database.
     /// Returns an error if the database was written by a newer version of forge.
     fn migrate_schema(conn: &Connection) -> Result<()> {
-        let on_disk: Option<i64> = match conn.query_row(
-            "SELECT version FROM schema_version LIMIT 1",
-            [],
-            |r| r.get(0),
-        ) {
-            Ok(v) => Some(v),
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => {
-                return Err(anyhow!(e)
-                    .context("failed to read schema_version from audit database"));
-            }
-        };
+        let on_disk: Option<i64> =
+            match conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                r.get(0)
+            }) {
+                Ok(v) => Some(v),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => {
+                    return Err(
+                        anyhow!(e).context("failed to read schema_version from audit database")
+                    );
+                }
+            };
 
         match on_disk {
             None => {
