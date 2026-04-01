@@ -163,6 +163,10 @@ cmd = "true"
     async fn injection_in_arguments_is_blocked() {
         let state = make_state(
             r#"
+[guard]
+enabled = true
+injection_mode = "block"
+
 [server.local]
 cmd = "true"
 "#,
@@ -277,6 +281,9 @@ deny_tools = ["admin_*"]
         // The second immediate call must be rejected with a rate-limit error.
         let state = make_state(
             r#"
+[guard]
+enabled = true
+
 [server.local]
 cmd = "true"
 max_calls_per_min = 1

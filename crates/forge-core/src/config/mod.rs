@@ -71,7 +71,7 @@ pub struct GuardConfig {
 }
 
 fn default_guard_enabled() -> bool {
-    true
+    false
 }
 
 fn default_injection_mode() -> String {
