@@ -241,7 +241,7 @@ Core commands currently available:
 - Policy deny events are audit logged.
 - Secrets resolved via env/keychain references.
 
-Note: `guard.enabled = false` disables injection checks and guard enforcement paths. Use for trusted local development only.
+Note: `guard.enabled = false` disables injection, rate, and cost guard checks. RBAC policy enforcement still applies. Use for trusted local development only.
 
 ## Development
 
