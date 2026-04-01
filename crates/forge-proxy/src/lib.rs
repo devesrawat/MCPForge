@@ -202,7 +202,10 @@ pub fn build_router(state: ProxyAppState) -> Router {
         .route("/messages", post(legacy_sse_info))
         // Security hardening: 10MB request limit and 60s timeout
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
-        .layer(TimeoutLayer::new(Duration::from_secs(60)))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(60),
+        ))
         .with_state(state)
 }
 
