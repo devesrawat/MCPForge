@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::thread;
 use std::time::Duration;
 
@@ -38,15 +38,15 @@ impl Logs {
         }
 
         if self.follow {
-            let mut file = fs::File::open(&log_path)?;
-            file.seek(SeekFrom::End(0))?;
+            let file = fs::File::open(&log_path)?;
+            let mut reader = BufReader::new(file);
+            reader.seek(SeekFrom::End(0))?;
             loop {
-                let mut buffer = String::new();
-                let bytes_read = file.read_to_string(&mut buffer)?;
-                if bytes_read > 0 {
-                    print!("{}", buffer);
+                let mut line = String::new();
+                match reader.read_line(&mut line)? {
+                    0 => thread::sleep(Duration::from_millis(250)),
+                    _ => print!("{}", line),
                 }
-                thread::sleep(Duration::from_secs(1));
             }
         }
 

@@ -11,33 +11,53 @@ use forge_core::supervisor::{PersistentState, state_file_path};
 pub struct Status {
     #[arg(long, help = "Update status every 2 seconds")]
     pub watch: bool,
+
+    #[arg(long, help = "Emit JSON instead of table output")]
+    pub json: bool,
 }
 
 impl Status {
     pub fn run(&self) -> Result<()> {
         if self.watch {
             loop {
-                Self::print_status()?;
+                self.print_status()?;
                 thread::sleep(Duration::from_secs(2));
             }
         } else {
-            Self::print_status()
+            self.print_status()
         }
     }
 
-    fn print_status() -> Result<()> {
+    fn print_status(&self) -> Result<()> {
         let path = state_file_path()?;
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("failed to read state file {}", path.display()))?;
         let state: PersistentState = serde_json::from_str(&contents)
             .with_context(|| format!("failed to parse state file {}", path.display()))?;
 
-        println!("started_at_secs: {}", state.started_at_secs);
-        println!("servers:");
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(&state)?);
+            return Ok(());
+        }
+
+        println!("STARTED_AT_SECS {}", state.started_at_secs);
+        println!(
+            "{:<18} {:<10} {:<8} {:<10} {:<9} LAST_ERROR",
+            "NAME", "STATUS", "PID", "UPTIME", "RESTARTS"
+        );
         for (name, info) in state.servers {
+            let pid = info
+                .pid
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_owned());
+            let uptime = info
+                .uptime_secs
+                .map(|v| format!("{}s", v))
+                .unwrap_or_else(|| "-".to_owned());
+            let last_error = info.last_error.unwrap_or_else(|| "-".to_owned());
             println!(
-                "- {}: {} pid={:?} uptime={:?} restarts={} last_error={:?}",
-                name, info.status, info.pid, info.uptime_secs, info.restarts, info.last_error
+                "{:<18} {:<10} {:<8} {:<10} {:<9} {}",
+                name, info.status, pid, uptime, info.restarts, last_error
             );
         }
 

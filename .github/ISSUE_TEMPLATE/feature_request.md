@@ -1,20 +1,48 @@
 ---
 name: Feature request
-about: Suggest an idea for this project
-title: ''
-labels: ''
-assignees: ''
+about: Propose a new capability or enhancement
+title: "[feature] "
+labels: [enhancement, triage]
+assignees: []
 
 ---
 
-**Is your feature request related to a problem? Please describe.**
-A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
+## Problem statement
 
-**Describe the solution you'd like**
-A clear and concise description of what you want to happen.
+What user or operator problem does this solve?
 
-**Describe alternatives you've considered**
-A clear and concise description of any alternative solutions or features you've considered.
+## Proposed solution
 
-**Additional context**
-Add any other context or screenshots about the feature request here.
+Describe the change and expected behavior.
+
+## Alternatives considered
+
+List alternatives and why they were rejected.
+
+## User impact
+
+- Who benefits from this?
+- How often does this problem occur?
+- What is the severity if not addressed?
+
+## Scope
+
+- [ ] CLI (`forge-cli`)
+- [ ] Core (`forge-core`)
+- [ ] Proxy (`forge-proxy`)
+- [ ] Docs/templates
+- [ ] CI/release
+
+## Acceptance criteria
+
+1. ...
+2. ...
+3. ...
+
+## Out of scope
+
+What should explicitly not be included in this change.
+
+## Additional context
+
+Links, prior art, related issues, or implementation hints.

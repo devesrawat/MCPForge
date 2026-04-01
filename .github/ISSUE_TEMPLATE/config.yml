@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/devesrawat/MCPForge/security/advisories/new
+    about: Please report security vulnerabilities privately.
+  - name: Project roadmap
+    url: https://github.com/devesrawat/MCPForge/blob/development/PLAN.md
+    about: Review planned milestones before opening a feature request.

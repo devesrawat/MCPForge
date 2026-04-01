@@ -9,7 +9,7 @@ pub mod validation;
 
 pub use policy::{RbacPolicy, validate_all_servers};
 pub use secret::{DefaultSecretResolver, SecretRef, SecretResolver};
-pub use validation::ValidationError;
+pub use validation::{ValidationError, validate_server_name};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -59,11 +59,32 @@ pub struct ServerConfig {
     pub estimated_cost_per_call_usd: Option<f64>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuardConfig {
-    #[serde(default)]
+    #[serde(default = "default_guard_enabled")]
     pub enabled: bool,
+
+    /// Prompt injection handling mode: "warn" or "block".
+    #[serde(default = "default_injection_mode")]
+    pub injection_mode: String,
+}
+
+fn default_guard_enabled() -> bool {
+    true
+}
+
+fn default_injection_mode() -> String {
+    "block".to_owned()
+}
+
+impl Default for GuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_guard_enabled(),
+            injection_mode: default_injection_mode(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

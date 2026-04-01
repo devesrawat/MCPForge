@@ -23,6 +23,7 @@ hex = { workspace = true }
 globset = { workspace = true }
 dashmap = { workspace = true }
 tracing = { workspace = true }
+regex = { workspace = true }
 rmcp = { workspace = true }
 
 [dev-dependencies]

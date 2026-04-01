@@ -1,32 +1,254 @@
 # MCP Forge
 
-A Rust workspace for `mcp-forge`, a CLI and daemon for managing MCP servers and tool execution.
+MCP Forge is a Rust CLI and local proxy that helps you run and govern multiple MCP servers through one endpoint.
 
-> See `PLAN.md` for the full design, architecture, timeline, risk register, testing strategy, and release plan.
+It focuses on practical operations: process supervision, tool namespacing, policy enforcement, rate and cost guards, and audit visibility.
 
-## What this repository contains
+## Why MCP Forge
 
-- `crates/forge-cli` — CLI binary powered by `clap`.
-- `crates/forge-core` — core logic for config, supervisor, audit, secret resolution, and protocol handling.
-- `crates/forge-proxy` — HTTP/axum proxy layer for MCP traffic and API exposure.
-- `crates/forge-mock-mcp` — mock MCP server for local integration testing.
-- `tests/` — workspace-level integration tests.
-- `forge.toml.example` — example runtime configuration.
-- `PLAN.md` — detailed development plan and architecture review.
+- One local endpoint for many MCP servers.
+- Safer tool execution with allow/deny policies and injection checks.
+- Operational controls (rate limits, daily caps, status, logs, restart).
+- Audit trail and reports for usage and latency insights.
 
-## Project goals
+## Current Status
 
-- Provide a unified management layer for MCP servers.
-- Offer a stable CLI interface for start/stop/status/audit operations.
-- Support secure secret resolution and transparent tool invocation.
-- Keep the architecture modular and easy to extend.
+- Language: Rust (workspace)
+- License: MIT
+- Primary branch: `development`
+- Project plan: [PLAN.md](PLAN.md)
 
-## Getting started
+## Features
+
+- Multi-server proxy with namespaced tools (`server__tool`).
+- Supervisor lifecycle commands: start, stop, restart, status, logs.
+- Config and secret workflows: init, add/remove/list, keychain/env checks.
+- Guard controls: prompt injection mode (`warn` or `block`), per-server rate limit (`max_calls_per_min`), and per-server daily cap (`max_calls_per_day`).
+- RBAC-style tool policy (`allowed_tools`, `deny_tools`, deny wins).
+- SQLite audit storage and summary reporting.
+- Discovery endpoint: `/.well-known/mcp-servers.json`.
+
+## Installation
+
+### Shell installer
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/devesrawat/MCPForge/main/install.sh | sh
+```
+
+### Homebrew (after first tagged release)
+
+```bash
+brew tap devesrawat/mcp-forge
+brew install forge
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/devesrawat/MCPForge.git
+cd MCPForge
+cargo build --release --bin forge
+```
+
+### Cargo install (local repo path)
+
+```bash
+cargo install --path crates/forge-cli
+```
+
+## Quickstart
+
+### 1) Add a server
+
+```bash
+forge add github --cmd "npx -y @modelcontextprotocol/server-github"
+```
+
+### 2) Start Forge
+
+```bash
+forge start
+```
+
+### 3) Check status
+
+```bash
+forge status
+```
+
+### 4) Connect your MCP client
+
+Use:
+
+```text
+http://127.0.0.1:3456
+```
+
+## Real-Life Usage Examples
+
+These examples show when MCP Forge is useful and how a new user can apply it immediately.
+
+### Example 1: Run multiple MCP servers behind one endpoint
+
+Problem: Your agent/client needs tools from more than one MCP server, but managing each server separately is noisy.
+
+```bash
+forge add github --cmd "npx -y @modelcontextprotocol/server-github"
+forge add filesystem --cmd "npx -y @modelcontextprotocol/server-filesystem /tmp"
+forge start
+forge status
+```
+
+Use a single MCP endpoint in your client:
+
+```text
+http://127.0.0.1:3456
+```
+
+What you get: one stable endpoint with namespaced tools like `github__*` and `filesystem__*`.
+
+### Example 2: Block unsafe tool calls in local development
+
+Problem: You want guardrails so suspicious prompts or tool arguments do not silently execute.
+
+In your `forge.toml`:
+
+```toml
+[guard]
+enabled = true
+injection_mode = "block"
+
+[server.github]
+cmd = "npx -y @modelcontextprotocol/server-github"
+transport = "stdio"
+allowed_tools = ["search_repositories", "get_file_contents"]
+deny_tools = ["delete_file", "create_or_update_file"]
+```
+
+Then validate and start:
+
+```bash
+forge check
+forge start
+```
+
+What you get: deny-first policy enforcement plus injection blocking for safer experimentation.
+
+### Example 3: Prevent runaway usage with limits and daily caps
+
+Problem: A noisy loop or aggressive agent behavior can call tools too often and inflate costs.
+
+In your `forge.toml`:
+
+```toml
+[server.github]
+cmd = "npx -y @modelcontextprotocol/server-github"
+transport = "stdio"
+max_calls_per_min = 30
+max_calls_per_day = 2000
+```
+
+Inspect usage:
+
+```bash
+forge audit
+forge report
+```
+
+What you get: predictable usage, explicit limit errors, and visibility into tool call volume and latency.
+
+### Example 4: Daily operator workflow
+
+```bash
+# start local stack
+forge start
+
+# check health
+forge status --watch
+
+# investigate events or failures
+forge logs github --follow
+
+# stop cleanly when done
+forge stop
+```
+
+What you get: clear operational lifecycle for local MCP infrastructure.
+
+## Configuration
+
+Start from [forge.toml.example](forge.toml.example).
+
+Minimal example:
+
+```toml
+[proxy]
+enabled = true
+bind = "127.0.0.1"
+port = 3456
+
+[guard]
+enabled = true
+injection_mode = "block" # "warn" or "block"
+
+[server.github]
+cmd = "npx -y @modelcontextprotocol/server-github"
+transport = "stdio"
+secret.GH_TOKEN = "env:GITHUB_TOKEN"
+max_calls_per_min = 60
+max_calls_per_day = 10000
+```
+
+Validate config:
+
+```bash
+forge check
+```
+
+## CLI Commands
+
+Core commands currently available:
+
+- `forge init`
+- `forge add`
+- `forge ls`
+- `forge remove`
+- `forge start`
+- `forge stop`
+- `forge restart`
+- `forge status [--watch] [--json]`
+- `forge logs <server> [--follow] [--lines N]`
+- `forge secret <set|ls|rm|check>`
+- `forge check`
+- `forge audit`
+- `forge report`
+
+## Project Layout
+
+- `crates/forge-cli` - CLI entrypoint and command handlers.
+- `crates/forge-core` - config, supervisor, protocol, secrets, audit.
+- `crates/forge-proxy` - axum JSON-RPC proxy and guard logic.
+- `crates/forge-mock-mcp` - mock MCP server for local tests.
+- `forge.toml.example` - sample config.
+- `RELEASE.md` - release runbook and rollback guide.
+
+## Security Model
+
+- Local binding defaults to `127.0.0.1`.
+- Request size and timeout constraints in proxy.
+- Optional injection checks for arguments and results.
+- Policy deny events are audit logged.
+- Secrets resolved via env/keychain references.
+
+Note: `guard.enabled = false` disables injection checks and guard enforcement paths. Use for trusted local development only.
+
+## Development
 
 ### Prerequisites
 
-- Rust toolchain (stable)
-- `cargo` installed
+- Rust stable toolchain
+- `cargo`
 
 ### Build
 
@@ -34,52 +256,33 @@ A Rust workspace for `mcp-forge`, a CLI and daemon for managing MCP servers and 
 cargo build --workspace
 ```
 
-### Run tests
+### Validate
 
 ```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 ```
 
-### Lint
+## Release
 
-```bash
-cargo clippy --all-targets --all-features -- -D warnings
-cargo fmt --all -- --check
-```
+Tag-driven release workflow:
 
-## Workspace layout
+- Workflow: [.github/workflows/release.yml](.github/workflows/release.yml)
+- Runbook: [RELEASE.md](RELEASE.md)
+- Real-life release examples: [RELEASE.md#real-life-examples](RELEASE.md#real-life-examples)
+- Helper script: `./scripts/release-tag.sh vX.Y.Z`
 
-The repository is organized as a Cargo workspace. The root `Cargo.toml` defines shared dependencies and members.
+## Roadmap
 
-### Crate roles
-
-- `forge-cli`: Entrypoint CLI and command dispatch.
-- `forge-core`: Shared domain models, supervisor, config, and audit modules.
-- `forge-proxy`: HTTP proxy and API server implementation.
-- `forge-mock-mcp`: Local mock MCP implementation for testing.
-
-## Recommended workflow
-
-1. Read `PLAN.md` first to understand the architecture and execution plan.
-2. Implement new features in `crates/forge-core` where core behavior belongs.
-3. Wire CLI commands in `crates/forge-cli`.
-4. Add integration coverage in `tests/`.
-
-## CI
-
-The repository uses GitHub Actions at `.github/workflows/ci.yml` to run:
-
-- `cargo fmt --all -- --check`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all`
+Execution plan and milestones are documented in [PLAN.md](PLAN.md).
 
 ## Contributing
 
-- Follow the workspace conventions.
-- Keep implementations small and modular.
-- Add tests for new behavior at the crate and workspace level.
-- Update `PLAN.md` if the architecture or design changes significantly.
+Contribution basics are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+If you submit code changes, please include tests and keep `fmt`, `clippy`, and `test` green.
 
 ## License
 
-MIT
+MIT. See [LICENCE](LICENCE).

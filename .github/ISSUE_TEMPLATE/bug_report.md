@@ -1,41 +1,59 @@
 ---
 name: Bug report
-about: Create a report to help us improve
-title: ''
-labels: ''
-assignees: ''
+about: Report a reproducible defect in MCP Forge
+title: "[bug] "
+labels: [bug, triage]
+assignees: []
 
 ---
 
-**Describe the bug**
-A clear and concise description of what the bug is.
+## Summary
 
-**To Reproduce**
-Steps to reproduce the behavior:
+A clear and concise description of the bug.
 
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+## Reproduction
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+Provide exact commands and config used.
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+1. ...
+2. ...
+3. ...
 
-**Desktop (please complete the following information):**
+## Expected behavior
 
-- OS: [e.g. iOS]
-- Browser [e.g. chrome, safari]
-- Version [e.g. 22]
+Describe what should have happened.
 
-**Smartphone (please complete the following information):**
+## Actual behavior
 
-- Device: [e.g. iPhone6]
-- OS: [e.g. iOS8.1]
-- Browser [e.g. stock browser, safari]
-- Version [e.g. 22]
+Describe what happened instead, including full error output.
 
-**Additional context**
-Add any other context about the problem here.
+## Minimal config (`forge.toml`)
+
+```toml
+# paste minimal reproducible config here
+```
+
+## Logs and output
+
+```text
+# paste forge output, stack traces, or CI links
+```
+
+## Environment
+
+- MCP Forge version (`forge --version`):
+- Rust version (`rustc -V`):
+- OS:
+- Shell:
+- How installed (homebrew/cargo/binary):
+
+## Impact
+
+- [ ] Blocks development
+- [ ] Intermittent failure
+- [ ] Data loss/corruption risk
+- [ ] Security-related
+
+## Additional context
+
+Anything else that helps us reproduce quickly.

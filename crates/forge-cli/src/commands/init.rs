@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use dialoguer::{Confirm, Input};
-use forge_core::config::{ForgeConfig, SecretRef, ServerConfig, Transport};
+use forge_core::config::{ForgeConfig, SecretRef, ServerConfig, Transport, validate_server_name};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -33,6 +33,10 @@ impl Init {
             if name.trim().is_empty() {
                 break;
             }
+            if let Err(e) = validate_server_name(name.trim()) {
+                println!("  Invalid server name: {}", e);
+                continue;
+            }
             let cmd: String = Input::new().with_prompt("Launch command").interact_text()?;
 
             let mut secret_map = HashMap::new();
@@ -49,7 +53,7 @@ impl Init {
             }
 
             cfg.server.insert(
-                name.clone(),
+                name.trim().to_owned(),
                 ServerConfig {
                     cmd,
                     transport: Transport::Stdio,
@@ -64,7 +68,7 @@ impl Init {
                     estimated_cost_per_call_usd: None,
                 },
             );
-            println!("Added server '{}'", name);
+            println!("Added server '{}'", name.trim());
 
             if !Confirm::new()
                 .with_prompt("Add another server?")

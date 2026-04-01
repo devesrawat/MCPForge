@@ -248,7 +248,20 @@ async fn run_server_loop(
             }
         };
 
-        let pid = child.id().unwrap_or(0);
+        let pid = match child.id() {
+            Some(p) => p,
+            None => {
+                let err = anyhow!(
+                    "failed to get PID for server '{}': process may have already exited",
+                    name
+                );
+                let _ = health_tx.send_replace(ServerHealth::Degraded {
+                    restarts: restart_count,
+                    last_error: err.to_string(),
+                });
+                return ServerResult::SpawnError(err);
+            }
+        };
         {
             let mut pid_lock = last_pid.lock().await;
             *pid_lock = Some(pid);
@@ -260,19 +273,17 @@ async fn run_server_loop(
             uptime_secs: 0,
         });
 
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        if stdout.is_none() || stderr.is_none() {
-            let err = anyhow!("failed to capture stdout/stderr for '{}'", name);
-            let _ = health_tx.send_replace(ServerHealth::Degraded {
-                restarts: restart_count,
-                last_error: err.to_string(),
-            });
-            return ServerResult::SpawnError(err);
-        }
-
-        let stdout = stdout.unwrap();
-        let stderr = stderr.unwrap();
+        let (stdout, stderr) = match (child.stdout.take(), child.stderr.take()) {
+            (Some(stdout), Some(stderr)) => (stdout, stderr),
+            _ => {
+                let err = anyhow!("failed to capture stdout/stderr for '{}'", name);
+                let _ = health_tx.send_replace(ServerHealth::Degraded {
+                    restarts: restart_count,
+                    last_error: err.to_string(),
+                });
+                return ServerResult::SpawnError(err);
+            }
+        };
         let log_buffer_clone = log_buffer.clone();
         let log_file_clone = log_file.clone();
         let capture_task = tokio::spawn(async move {
@@ -350,7 +361,10 @@ async fn capture_output(
                         append_log(&mut output_file, LogStream::Stdout, line).await?;
                     }
                     Ok(None) => break,
-                    Err(_) => break,
+                    Err(e) => {
+                        tracing::warn!("error reading stdout from child process: {}", e);
+                        break;
+                    }
                 }
             }
             result = stderr_reader.next_line() => {
@@ -360,7 +374,10 @@ async fn capture_output(
                         append_log(&mut output_file, LogStream::Stderr, line).await?;
                     }
                     Ok(None) => break,
-                    Err(_) => break,
+                    Err(e) => {
+                        tracing::warn!("error reading stderr from child process: {}", e);
+                        break;
+                    }
                 }
             }
         }
@@ -400,8 +417,7 @@ pub fn user_stop_marker_path(server: &str) -> Result<PathBuf> {
 }
 
 pub fn data_dir() -> Result<PathBuf> {
-    let home = env::var("HOME").context("HOME environment variable is not set")?;
-    let path = PathBuf::from(home).join(".forge");
+    let path = forge_home_dir()?;
     fs::create_dir_all(&path)
         .with_context(|| format!("failed to create forge data directory '{}'", path.display()))?;
     Ok(path)
@@ -436,6 +452,11 @@ pub fn logs_dir_path() -> Result<PathBuf> {
 }
 
 fn forge_home_dir() -> Result<PathBuf> {
+    // FORGE_HOME lets tests (and advanced users) redirect all forge data without
+    // touching HOME, which is unsafe to mutate in a multithreaded process.
+    if let Ok(forge_home) = env::var("FORGE_HOME") {
+        return Ok(PathBuf::from(forge_home));
+    }
     let home = env::var("HOME").context("HOME environment variable is not set")?;
     Ok(PathBuf::from(home).join(".forge"))
 }

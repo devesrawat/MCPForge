@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -9,6 +9,7 @@ use chrono::Datelike;
 use dashmap::DashMap;
 use forge_core::audit::{AuditEvent, AuditWriter};
 use forge_core::config::{ForgeConfig, RbacPolicy};
+use forge_core::injection::{InjectionDetector, InjectionMode};
 use forge_core::mcp::ToolRegistry;
 use governor::clock::DefaultClock;
 use governor::state::{InMemoryState, NotKeyed};
@@ -19,7 +20,8 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tower_http::timeout::TimeoutLayer;
 use tracing::instrument;
 
 pub type SharedLimiter = Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>;
@@ -51,7 +53,7 @@ impl CostGuard {
 
     fn roll_day_if_needed(&self) {
         let today = Self::current_day_key();
-        let prev = self.day.load(Ordering::Relaxed);
+        let prev = self.day.load(Ordering::SeqCst);
         if today != prev
             && self
                 .day
@@ -71,9 +73,11 @@ impl CostGuard {
             .counts
             .entry(server.to_string())
             .or_insert_with(|| AtomicU64::new(0));
-        let cur = entry.fetch_add(1, Ordering::Relaxed);
-        if cur >= max as u64 {
-            entry.fetch_sub(1, Ordering::Relaxed);
+        // Increment first, then check: prevents concurrent threads from both
+        // reading the same pre-increment value and both passing the limit.
+        let new_val = entry.fetch_add(1, Ordering::SeqCst) + 1;
+        if new_val > max as u64 {
+            entry.fetch_sub(1, Ordering::SeqCst);
             return Err(anyhow::anyhow!(
                 "Daily limit exceeded for '{}': max {} calls per day (UTC)",
                 server,
@@ -92,6 +96,7 @@ pub struct ProxyAppState {
     pub rate_limiters: Arc<DashMap<String, SharedLimiter>>,
     pub cost_guard: Arc<CostGuard>,
     pub policies: Arc<HashMap<String, RbacPolicy>>,
+    pub injection_detector: Arc<InjectionDetector>,
 }
 
 impl ProxyAppState {
@@ -100,6 +105,8 @@ impl ProxyAppState {
         config: ForgeConfig,
         audit: Option<Arc<AuditWriter>>,
     ) -> anyhow::Result<Self> {
+        let injection_mode = parse_injection_mode(&config.guard.injection_mode)?;
+
         let rate_limiters = Arc::new(DashMap::new());
         for (name, srv) in &config.server {
             let n = NonZeroU32::new(srv.max_calls_per_min.max(1)).unwrap();
@@ -123,7 +130,19 @@ impl ProxyAppState {
             rate_limiters,
             cost_guard: Arc::new(CostGuard::new()),
             policies: Arc::new(policies),
+            injection_detector: Arc::new(InjectionDetector::new(injection_mode)),
         })
+    }
+}
+
+fn parse_injection_mode(mode: &str) -> anyhow::Result<InjectionMode> {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "warn" => Ok(InjectionMode::Warn),
+        "block" => Ok(InjectionMode::Block),
+        other => Err(anyhow::anyhow!(
+            "invalid guard.injection_mode '{}'; expected 'warn' or 'block'",
+            other
+        )),
     }
 }
 
@@ -178,9 +197,35 @@ impl JsonRpcResponse {
 pub fn build_router(state: ProxyAppState) -> Router {
     Router::new()
         .route("/", post(handle_mcp_request))
+        .route("/.well-known/mcp-servers.json", get(handle_well_known))
         .route("/sse", get(legacy_sse_info))
         .route("/messages", post(legacy_sse_info))
+        // Security hardening: 10MB request limit and 60s timeout
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
+        .layer(TimeoutLayer::new(Duration::from_secs(60)))
         .with_state(state)
+}
+
+async fn handle_well_known(State(state): State<ProxyAppState>) -> impl IntoResponse {
+    let mut servers = Vec::new();
+
+    for (name, config) in &state.config.server {
+        let server_info = json!({
+            "name": name,
+            "transport": "http",
+            "endpoint": format!("http://localhost:{}/", state.config.proxy.port),
+            "tags": config.tags,
+        });
+        servers.push(server_info);
+    }
+
+    let response = json!({
+        "forge_version": env!("CARGO_PKG_VERSION"),
+        "mcp_version": "2024-11-05",
+        "servers": servers,
+    });
+
+    (StatusCode::OK, Json(response))
 }
 
 async fn legacy_sse_info() -> impl IntoResponse {
@@ -285,11 +330,40 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
 
+    if state.config.guard.enabled {
+        // Scan arguments for prompt injection
+        if let Some(alert) = state.injection_detector.scan_arguments(&args) {
+            tracing::warn!(
+                matched_pattern = alert.matched_pattern,
+                position = alert.position,
+                "prompt injection detected in tool arguments"
+            );
+
+            if state.injection_detector.mode() == InjectionMode::Block {
+                return Err(ProxyError::injection_detected(
+                    "Potential prompt injection detected in arguments",
+                ));
+            }
+        }
+    }
+
     let (server, orig_tool) = forge_core::protocol::parse_namespaced_tool(tool_name)
         .ok_or_else(|| ProxyError::invalid_params("tool name must be server__tool"))?;
 
     if let Some(policy) = state.policies.get(server) {
         if !policy.is_allowed(orig_tool) {
+            if let Some(audit_writer) = &state.audit {
+                let event = AuditEvent::new(
+                    server,
+                    orig_tool,
+                    &args,
+                    -403,
+                    0,
+                    Some("tool blocked by policy".to_owned()),
+                    None,
+                );
+                audit_writer.log(event);
+            }
             return Err(ProxyError::policy_denied(format!(
                 "tool '{}' blocked by policy for server '{}'",
                 orig_tool, server
@@ -297,9 +371,11 @@ async fn handle_tools_call(
         }
     }
 
-    if let Some(lim) = state.rate_limiters.get(server) {
-        if lim.check().is_err() {
-            return Err(ProxyError::rate_limited(server));
+    if state.config.guard.enabled {
+        if let Some(lim) = state.rate_limiters.get(server) {
+            if lim.check().is_err() {
+                return Err(ProxyError::rate_limited(server));
+            }
         }
     }
 
@@ -309,10 +385,12 @@ async fn handle_tools_call(
         .get(server)
         .ok_or_else(|| ProxyError::internal(anyhow::anyhow!("unknown server {}", server)))?;
 
-    state
-        .cost_guard
-        .check(server, srv_cfg.max_calls_per_day)
-        .map_err(ProxyError::internal)?;
+    if state.config.guard.enabled {
+        state
+            .cost_guard
+            .check(server, srv_cfg.max_calls_per_day)
+            .map_err(ProxyError::internal)?;
+    }
 
     let start = Instant::now();
     let result = state.registry.call_tool(tool_name, args.clone()).await;
@@ -321,6 +399,25 @@ async fn handle_tools_call(
     tracing::Span::current().record("latency_ms", latency_ms);
     tracing::Span::current().record("server", server);
     tracing::Span::current().record("tool", orig_tool);
+
+    // Scan tool result for indirect prompt injection
+    if state.config.guard.enabled {
+        if let Ok(ref result_value) = result {
+            if let Some(alert) = state.injection_detector.scan_result(result_value) {
+                tracing::warn!(
+                    matched_pattern = alert.matched_pattern,
+                    position = alert.position,
+                    "prompt injection detected in tool result (indirect injection)"
+                );
+
+                if state.injection_detector.mode() == InjectionMode::Block {
+                    return Err(ProxyError::injection_detected(
+                        "Potential prompt injection detected in tool result",
+                    ));
+                }
+            }
+        }
+    }
 
     if let Some(audit_writer) = &state.audit {
         if let Some((s, t)) = forge_core::protocol::parse_namespaced_tool(tool_name) {
@@ -340,6 +437,7 @@ pub enum ProxyError {
     MethodNotFound(String),
     RateLimited(String),
     PolicyDenied(String),
+    InjectionDetected(String),
     Internal(anyhow::Error),
 }
 
@@ -360,6 +458,10 @@ impl ProxyError {
         ProxyError::PolicyDenied(message.into())
     }
 
+    pub fn injection_detected(message: impl Into<String>) -> Self {
+        ProxyError::InjectionDetected(message.into())
+    }
+
     pub fn internal(error: impl Into<anyhow::Error>) -> Self {
         ProxyError::Internal(error.into())
     }
@@ -370,6 +472,7 @@ impl ProxyError {
             ProxyError::MethodNotFound(_) => -32601,
             ProxyError::RateLimited(_) => -32_000,
             ProxyError::PolicyDenied(_) => -32_000,
+            ProxyError::InjectionDetected(_) => -32_000,
             ProxyError::Internal(_) => -32_000,
         }
     }
@@ -382,12 +485,87 @@ impl std::fmt::Display for ProxyError {
             ProxyError::MethodNotFound(method) => write!(f, "Method not found: {}", method),
             ProxyError::RateLimited(s) => write!(f, "Rate limit exceeded for server '{}'", s),
             ProxyError::PolicyDenied(m) => write!(f, "{}", m),
+            ProxyError::InjectionDetected(m) => write!(f, "Security violation: {}", m),
             ProxyError::Internal(err) => write!(f, "Internal error: {}", err),
         }
     }
 }
 
 impl std::error::Error for ProxyError {}
+
+#[cfg(test)]
+mod cost_guard_tests {
+    use super::*;
+
+    #[test]
+    fn enforces_exact_daily_limit() {
+        let guard = CostGuard::new();
+        for _ in 0..5 {
+            assert!(
+                guard.check("svc", Some(5)).is_ok(),
+                "calls within limit should succeed"
+            );
+        }
+        assert!(
+            guard.check("svc", Some(5)).is_err(),
+            "call exceeding daily limit should fail"
+        );
+    }
+
+    #[test]
+    fn no_limit_is_unrestricted() {
+        let guard = CostGuard::new();
+        for _ in 0..1_000 {
+            assert!(guard.check("svc", None).is_ok());
+        }
+    }
+
+    #[test]
+    fn limits_are_per_server() {
+        let guard = CostGuard::new();
+        for _ in 0..3 {
+            assert!(guard.check("alpha", Some(3)).is_ok());
+            assert!(guard.check("beta", Some(3)).is_ok());
+        }
+        assert!(guard.check("alpha", Some(3)).is_err());
+        assert!(guard.check("beta", Some(3)).is_err());
+    }
+
+    #[test]
+    fn concurrent_calls_never_exceed_limit() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const LIMIT: u32 = 10;
+        const THREADS: usize = 100;
+
+        let guard = Arc::new(CostGuard::new());
+        let successes = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let g = guard.clone();
+                let s = successes.clone();
+                std::thread::spawn(move || {
+                    if g.check("svc", Some(LIMIT)).is_ok() {
+                        s.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let total = successes.load(Ordering::SeqCst);
+        assert_eq!(
+            total, LIMIT as usize,
+            "exactly LIMIT={} calls should succeed under concurrent load, got {}",
+            LIMIT, total
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
