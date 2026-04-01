@@ -110,8 +110,7 @@ pub fn run_checks(config: &ForgeConfig) -> (usize, usize) {
                 }
                 forge_core::config::SecretRef::Literal(_) => {
                     println!(
-                        "    [WARN] secret '{}' is literal in config (use env or keychain)",
-                        var_name
+                        "    [WARN] a secret is configured as a literal value (use env or keychain instead)"
                     );
                     warning_count += 1;
                 }
