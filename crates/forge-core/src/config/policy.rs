@@ -1,7 +1,7 @@
 //! Tool allow/deny globs (RBAC-style policy at config time).
 
-use crate::config::{ServerConfig, ValidationError};
 use crate::config::validation::validate_server_name;
+use crate::config::{ServerConfig, ValidationError};
 use globset::{Glob, GlobMatcher};
 
 #[derive(Debug)]

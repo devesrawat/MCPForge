@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use forge_core::config::ForgeConfig;
+use std::net::TcpListener;
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]
@@ -20,7 +21,14 @@ impl Check {
         let config = ForgeConfig::load_from_file(&config_path)
             .with_context(|| format!("failed to parse config file {}", config_path.display()))?;
 
-        println!("Checking forge configuration at {}...\n", config_path.display());
+        println!(
+            "Checking forge configuration at {}...\n",
+            config_path.display()
+        );
+
+        if self.fix {
+            anyhow::bail!("--fix is not implemented yet; run without --fix for read-only checks");
+        }
 
         let (error_count, warning_count) = run_checks(&config);
 
@@ -68,25 +76,18 @@ pub fn run_checks(config: &ForgeConfig) -> (usize, usize) {
             match secret_ref {
                 forge_core::config::SecretRef::Env(var) => {
                     if std::env::var(var).is_ok() {
-                        println!(
-                            "    [OK] secret '{}' env var '{}' resolves",
-                            var_name, var
-                        );
+                        println!("    [OK] secret '{}' env var '{}' resolves", var_name, var);
                     } else {
-                        println!(
-                            "    [ERR] secret '{}' env var '{}' not set",
-                            var_name, var
-                        );
+                        println!("    [ERR] secret '{}' env var '{}' not set", var_name, var);
                         error_count += 1;
                     }
                 }
                 forge_core::config::SecretRef::Keychain(key) => {
                     match keyring::Entry::new("mcp-forge", key) {
                         Ok(entry) => match entry.get_password() {
-                            Ok(_) => println!(
-                                "    [OK] secret '{}' keychain entry exists",
-                                var_name
-                            ),
+                            Ok(_) => {
+                                println!("    [OK] secret '{}' keychain entry exists", var_name)
+                            }
                             Err(_) => {
                                 println!(
                                     "    [ERR] secret '{}' keychain entry not found",
@@ -153,6 +154,26 @@ pub fn run_checks(config: &ForgeConfig) -> (usize, usize) {
         "    [OK] listening on {}:{}",
         config.proxy.bind, config.proxy.port
     );
+
+    if config.proxy.enabled {
+        let addr = format!("{}:{}", config.proxy.bind, config.proxy.port);
+        match TcpListener::bind(&addr) {
+            Ok(listener) => {
+                drop(listener);
+                println!(
+                    "    [OK] port {} bind check passed (availability may change before start)",
+                    config.proxy.port
+                );
+            }
+            Err(err) => {
+                println!(
+                    "    [ERR] port {} is not available ({}): {}",
+                    config.proxy.port, addr, err
+                );
+                error_count += 1;
+            }
+        }
+    }
     println!();
 
     (error_count, warning_count)
@@ -174,7 +195,10 @@ cmd = "true"
 allowed_tools = ["invalid[glob"]
 "#,
         );
-        assert!(result.is_err(), "invalid allow glob should fail config parsing");
+        assert!(
+            result.is_err(),
+            "invalid allow glob should fail config parsing"
+        );
     }
 
     #[test]
@@ -186,7 +210,10 @@ cmd = "true"
 deny_tools = ["broken[pattern"]
 "#,
         );
-        assert!(result.is_err(), "invalid deny glob should fail config parsing");
+        assert!(
+            result.is_err(),
+            "invalid deny glob should fail config parsing"
+        );
     }
 
     #[test]
@@ -203,7 +230,10 @@ secret.API_KEY = "env:{}"
         ))
         .unwrap();
         let (errors, _) = run_checks(&cfg);
-        assert!(errors > 0, "missing env var should produce at least one error");
+        assert!(
+            errors > 0,
+            "missing env var should produce at least one error"
+        );
     }
 
     #[test]

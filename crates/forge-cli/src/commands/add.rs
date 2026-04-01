@@ -26,8 +26,7 @@ impl Add {
             }
         };
 
-        validate_server_name(&self.name)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        validate_server_name(&self.name).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         if cfg.server.contains_key(&self.name) {
             anyhow::bail!("server '{}' already exists in forge.toml", self.name);
