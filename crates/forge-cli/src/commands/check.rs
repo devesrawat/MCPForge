@@ -79,9 +79,9 @@ pub fn run_checks(config: &ForgeConfig) -> (usize, usize) {
             match secret_ref {
                 forge_core::config::SecretRef::Env(var) => {
                     if std::env::var(var).is_ok() {
-                        println!("    [OK] secret '{}' env var '{}' resolves", var_name, var);
+                        println!("    [OK] secret '{}' resolves from environment", var_name);
                     } else {
-                        println!("    [ERR] secret '{}' env var '{}' not set", var_name, var);
+                        println!("    [ERR] secret '{}' environment source not set", var_name);
                         error_count += 1;
                     }
                 }
