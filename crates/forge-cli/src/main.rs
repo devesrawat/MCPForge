@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod commands;
+#[cfg(feature = "otlp")]
 mod telemetry;
 use commands::{
     Add, Audit, Check, Init, Logs, Ls, Remove, Report, Restart, Secret, Start, Status, Stop,

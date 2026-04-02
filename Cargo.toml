@@ -12,6 +12,7 @@ cargo-dist-version = "0.28.0"
 ci = "github"
 installers = ["shell", "homebrew"]
 tap = "devesrawat/mcp-forge"
+publish-jobs = ["homebrew"]
 targets = [
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",

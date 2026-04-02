@@ -2,7 +2,6 @@
 //!
 //! Set `OTEL_EXPORTER_OTLP_ENDPOINT` (for example `http://127.0.0.1:4317`).
 
-#[cfg(feature = "otlp")]
 pub fn init_otlp() -> anyhow::Result<()> {
     use opentelemetry::global;
     use opentelemetry::trace::TracerProvider as _;

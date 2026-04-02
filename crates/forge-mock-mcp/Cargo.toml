@@ -3,6 +3,8 @@ name = "forge-mock-mcp"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+repository = "https://github.com/devesrawat/MCPForge"
+publish = false
 
 [[bin]]
 name = "forge-mock-mcp"
