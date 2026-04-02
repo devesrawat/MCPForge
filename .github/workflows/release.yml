@@ -57,7 +57,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Validate tests
-        run: cargo test --all
+        run: cargo test --all --locked
 
       - name: Build release artifacts
         run: cargo dist build --tag ${{ env.RELEASE_TAG }}
