@@ -35,14 +35,20 @@ jobs:
       CARGO_DIST_VERSION: "0.28.0"
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Install cargo-dist
-        run: cargo install cargo-dist --locked --version "$CARGO_DIST_VERSION"
+        run: cargo install cargo-dist --locked --version ${{ env.CARGO_DIST_VERSION }}
 
       - name: Validate formatting
         run: cargo fmt --all -- --check
@@ -51,12 +57,12 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Validate tests
-        run: cargo test --all
+        run: cargo test --all --locked
 
       - name: Build release artifacts
-        run: cargo dist build --tag "$RELEASE_TAG"
+        run: cargo dist build --tag ${{ env.RELEASE_TAG }}
 
       - name: Publish GitHub release assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: cargo dist host --tag "$RELEASE_TAG"
+        run: cargo dist host --tag ${{ env.RELEASE_TAG }}
