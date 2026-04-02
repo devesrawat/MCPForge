@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 autobins = false
+repository = "https://github.com/devesrawat/MCPForge"
+homepage = "https://github.com/devesrawat/MCPForge"
+description = "Local proxy and governance tool for MCP servers"
+
+[package.metadata.dist]
+formula = "forge"
 
 [[bin]]
 name = "forge"
