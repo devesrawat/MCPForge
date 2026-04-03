@@ -9,7 +9,7 @@ homepage = "https://github.com/devesrawat/MCPForge"
 description = "Local proxy and governance tool for MCP servers"
 
 [package.metadata.dist]
-formula = "forge"
+formula = "mcp-forge"
 
 [[bin]]
 name = "forge"
