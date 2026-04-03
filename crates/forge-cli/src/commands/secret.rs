@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]
+#[command(about = "Manage secrets for MCP server configuration")]
 pub struct Secret {
     #[command(subcommand)]
     pub action: SecretAction,

@@ -7,6 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 #[derive(Debug, Args)]
+#[command(about = "Stop forge and all running MCP servers")]
 pub struct Stop {
     #[arg(help = "Stop only this server (supervisor mode)", required = false)]
     pub server: Option<String>,

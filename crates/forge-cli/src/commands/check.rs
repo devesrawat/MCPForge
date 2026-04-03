@@ -5,6 +5,7 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]
+#[command(about = "Validate forge.toml configuration")]
 pub struct Check {
     #[arg(long, help = "Fix common issues automatically")]
     pub fix: bool,

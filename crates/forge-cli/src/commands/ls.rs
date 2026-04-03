@@ -4,6 +4,7 @@ use forge_core::config::ForgeConfig;
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]
+#[command(about = "List configured MCP servers")]
 pub struct Ls {}
 
 impl Ls {

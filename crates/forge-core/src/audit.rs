@@ -198,6 +198,22 @@ impl AuditReader {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| "failed to open audit database for reading")?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS audit_events (
+                 id          TEXT PRIMARY KEY,
+                 ts          INTEGER NOT NULL,
+                 server      TEXT NOT NULL,
+                 tool        TEXT NOT NULL,
+                 args_hash   TEXT,
+                 result_code INTEGER,
+                 latency_ms  INTEGER,
+                 error       TEXT,
+                 session_id  TEXT
+             ) STRICT;
+             CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
+             CREATE INDEX IF NOT EXISTS idx_audit_server ON audit_events(server);",
+        )
+        .with_context(|| "failed to initialize audit database schema")?;
         Ok(Self { conn })
     }
 
