@@ -28,7 +28,7 @@ fn main() -> anyhow::Result<()> {
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "serverInfo": { "name": "forge-mock-mcp", "version": "0.1.0" }
+                    "serverInfo": { "name": "forge-mock-mcp", "version": env!("CARGO_PKG_VERSION") }
                 }
             }),
             "notifications/initialized" => {
