@@ -10,6 +10,7 @@ pub enum OutputFormat {
 }
 
 #[derive(Debug, Args)]
+#[command(about = "Query the audit log of tool calls")]
 pub struct Audit {
     #[arg(long, help = "Filter by server name")]
     pub server: Option<String>,

@@ -8,6 +8,7 @@ use std::time::Duration;
 use forge_core::supervisor::logs_dir_path;
 
 #[derive(Debug, Args)]
+#[command(about = "Show or follow logs for an MCP server")]
 pub struct Logs {
     #[arg(help = "Server name")]
     pub server: String,

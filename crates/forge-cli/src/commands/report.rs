@@ -21,6 +21,7 @@ pub enum OutputFormat {
 }
 
 #[derive(Debug, Args)]
+#[command(about = "Print a usage and cost summary report")]
 pub struct Report {
     #[arg(long, default_value_t = Period::Week, value_enum)]
     pub period: Period,

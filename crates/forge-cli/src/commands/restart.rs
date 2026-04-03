@@ -7,6 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 #[derive(Debug, Args)]
+#[command(about = "Restart a specific MCP server")]
 pub struct Restart {
     #[arg(help = "Server name to restart")]
     pub server: String,

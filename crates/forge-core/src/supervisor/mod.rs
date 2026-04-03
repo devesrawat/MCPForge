@@ -148,7 +148,23 @@ impl Supervisor {
                 println!("Shutting down...");
                 self.shutdown.cancel();
             }
-            _ = self.tasks.join_next() => {}
+            result = self.tasks.join_next() => {
+                if let Some(Ok((name, reason))) = result {
+                    match reason {
+                        ServerResult::SpawnError(e) => {
+                            eprintln!("error: server '{}' failed to start: {}", name, e);
+                        }
+                        ServerResult::MaxRestartsExceeded => {
+                            eprintln!("error: server '{}' exceeded max restart attempts and exited", name);
+                        }
+                        ServerResult::CleanExit => {
+                            println!("server '{}' exited cleanly", name);
+                        }
+                        ServerResult::Shutdown | ServerResult::UserStopped => {}
+                    }
+                }
+                self.shutdown.cancel();
+            }
         }
 
         while self.tasks.join_next().await.is_some() {}

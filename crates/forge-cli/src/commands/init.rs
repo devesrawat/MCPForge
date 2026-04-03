@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]
+#[command(about = "Interactively create a new forge.toml")]
 pub struct Init {}
 
 impl Init {

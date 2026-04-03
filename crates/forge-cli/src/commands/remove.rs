@@ -4,6 +4,7 @@ use forge_core::config::ForgeConfig;
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]
+#[command(about = "Remove an MCP server from forge.toml")]
 pub struct Remove {
     #[arg(help = "Server name")]
     pub name: String,

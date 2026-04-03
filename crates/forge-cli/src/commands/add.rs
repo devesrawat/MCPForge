@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]
+#[command(about = "Add an MCP server to forge.toml")]
 pub struct Add {
     #[arg(help = "Server name (TOML key)")]
     pub name: String,
@@ -48,6 +49,11 @@ impl Add {
                 estimated_cost_per_call_usd: None,
             },
         );
+
+        // Enable the HTTP proxy by default so clients can connect after forge start.
+        if !cfg.proxy.enabled {
+            cfg.proxy.enabled = true;
+        }
 
         cfg.save_to_file(&path)
             .with_context(|| format!("write {}", path.display()))?;

@@ -8,6 +8,7 @@ use std::time::Duration;
 use forge_core::supervisor::{PersistentState, state_file_path};
 
 #[derive(Debug, Args)]
+#[command(about = "Show running status of all MCP servers")]
 pub struct Status {
     #[arg(long, help = "Update status every 2 seconds")]
     pub watch: bool,

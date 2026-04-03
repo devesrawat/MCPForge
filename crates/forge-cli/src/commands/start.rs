@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::runtime::Builder;
 
 #[derive(Debug, Args)]
+#[command(about = "Start all configured MCP servers (and the proxy)")]
 pub struct Start {
     #[arg(long, help = "Run the supervisor in daemon mode")]
     pub daemon: bool,
