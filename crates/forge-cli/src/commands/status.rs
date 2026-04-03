@@ -30,8 +30,21 @@ impl Status {
 
     fn print_status(&self) -> Result<()> {
         let path = state_file_path()?;
-        let contents = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read state file {}", path.display()))?;
+        let contents = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if self.json {
+                    println!("{}", serde_json::json!({ "status": "not running" }));
+                } else {
+                    println!("forge is not running (no state file found)");
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("failed to read state file {}", path.display()));
+            }
+        };
         let state: PersistentState = serde_json::from_str(&contents)
             .with_context(|| format!("failed to parse state file {}", path.display()))?;
 
