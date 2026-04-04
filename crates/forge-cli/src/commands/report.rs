@@ -156,7 +156,7 @@ fn summarize_events(
             let p99_latency = if latencies.is_empty() {
                 0
             } else {
-                let index = ((latencies.len() as f64) * 0.99).ceil() as usize;
+                let index = latencies.len().saturating_mul(99).div_ceil(100);
                 let index = index.saturating_sub(1).min(latencies.len() - 1);
                 latencies[index]
             };

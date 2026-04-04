@@ -51,7 +51,9 @@ impl CostGuard {
 
     fn current_day_key() -> u64 {
         let d = chrono::Utc::now().date_naive();
-        d.year() as u64 * 10_000 + d.month() as u64 * 100 + d.day() as u64
+        u64::try_from(d.year()).unwrap_or(0) * 10_000
+            + u64::from(d.month()) * 100
+            + u64::from(d.day())
     }
 
     fn roll_day_if_needed(&self) {
@@ -351,7 +353,7 @@ async fn handle_tools_call(
 
     let start = Instant::now();
     let result = state.registry.call_tool(tool_name, args.clone()).await;
-    let latency_ms = start.elapsed().as_millis() as u64;
+    let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
     tracing::Span::current().record("latency_ms", latency_ms);
 
     if let Ok(ref v) = result {
