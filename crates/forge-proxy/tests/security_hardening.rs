@@ -199,7 +199,7 @@ cmd = "true"
             "error should mention injection, got: {}",
             message
         );
-        assert_eq!(resp["error"]["code"].as_i64().unwrap(), -32_000);
+        assert_eq!(resp["error"]["code"].as_i64().unwrap(), -32_002);
         assert!(resp["result"].is_null(), "result should be null on error");
     }
 
@@ -272,7 +272,7 @@ deny_tools = ["admin_*"]
             "error should indicate policy denial, got: {}",
             message
         );
-        assert_eq!(resp["error"]["code"].as_i64().unwrap(), -32_000);
+        assert_eq!(resp["error"]["code"].as_i64().unwrap(), -32_001);
     }
 
     #[tokio::test]
@@ -375,6 +375,38 @@ deny_tools = ["admin_*"]
             !resp["result"].is_null(),
             "non-denied tool should succeed: {:?}",
             resp
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_connect_returns_ok_with_event_stream_content_type() {
+        let state = make_state(
+            r#"
+[server.local]
+cmd = "true"
+"#,
+            "local",
+            vec!["ping"],
+        );
+        let router = build_router(state);
+
+        // Open the SSE stream — should return 200 with text/event-stream.
+        let sse_req = Request::builder()
+            .method("GET")
+            .uri("/sse")
+            .header("accept", "text/event-stream")
+            .body(Body::empty())
+            .unwrap();
+        let sse_resp = router.clone().oneshot(sse_req).await.unwrap();
+        assert_eq!(sse_resp.status(), StatusCode::OK);
+        let ct = sse_resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.starts_with("text/event-stream"),
+            "expected text/event-stream content-type, got: {ct}"
         );
     }
 }

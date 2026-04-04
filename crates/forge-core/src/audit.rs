@@ -157,13 +157,11 @@ impl AuditWriter {
         Self::migrate_schema(&conn)?;
 
         let (tx, rx) = channel::<AuditEvent>();
-        let db_path_clone = db_path.clone();
 
         thread::Builder::new()
             .name("forge-audit-writer".to_string())
             .spawn(move || {
-                let mut conn = Connection::open(&db_path_clone)
-                    .expect("failed to open audit database in writer thread");
+                let mut conn = conn;
 
                 while let Ok(event) = rx.recv() {
                     let mut batch = vec![event];
@@ -252,7 +250,7 @@ impl AuditReader {
         sql.push_str(" ORDER BY ts DESC");
         if let Some(limit) = limit {
             sql.push_str(" LIMIT ?");
-            params.push(Box::new(limit as i64));
+            params.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
         }
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -265,7 +263,7 @@ impl AuditReader {
                 tool: row.get(3)?,
                 args_hash: row.get(4)?,
                 result_code: row.get(5)?,
-                latency_ms: row.get::<_, i64>(6)? as u64,
+                latency_ms: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
                 error: row.get(7)?,
                 session_id: row.get(8)?,
             })
@@ -300,7 +298,7 @@ fn insert_batch(conn: &mut Connection, batch: &[AuditEvent]) -> Result<()> {
                 event.tool,
                 event.args_hash,
                 event.result_code,
-                event.latency_ms as i64,
+                i64::try_from(event.latency_ms).unwrap_or(i64::MAX),
                 event.error,
                 event.session_id,
             ])?;

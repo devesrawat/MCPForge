@@ -61,6 +61,7 @@ fn parse_cmd_parts_with_quotes() {
         env: HashMap::new(),
         ready_timeout_secs: None,
         estimated_cost_per_call_usd: None,
+        max_restarts: None,
     };
 
     let parts = config.cmd_parts();

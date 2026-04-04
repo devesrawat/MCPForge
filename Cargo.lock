@@ -781,6 +781,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",
@@ -836,6 +837,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "forge-core",
+ "futures",
  "governor",
  "serde",
  "serde_json",
@@ -843,6 +845,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinSet;
@@ -38,8 +39,15 @@ pub struct ServerHandle {
 #[derive(Debug, Clone, Serialize)]
 pub enum ServerHealth {
     Starting,
-    Running { pid: u32, uptime_secs: u64 },
-    Degraded { restarts: u32, last_error: String },
+    Running {
+        pid: u32,
+        uptime_secs: u64,
+        restarts: u32,
+    },
+    Degraded {
+        restarts: u32,
+        last_error: String,
+    },
     Stopped,
 }
 
@@ -213,143 +221,185 @@ async fn run_server_loop(
     shutdown: CancellationToken,
 ) -> ServerResult {
     let mut restart_count = 0u32;
+    let max_restarts = config.max_restarts.unwrap_or(5);
     let max_backoff = Duration::from_secs(30);
 
     loop {
-        if let Ok(marker) = user_stop_marker_path(&name) {
-            if marker.exists() {
-                let _ = fs::remove_file(&marker);
-                let _ = health_tx.send_replace(ServerHealth::Stopped);
-                return ServerResult::UserStopped;
-            }
+        if is_stop_requested(&name) {
+            let _ = health_tx.send_replace(ServerHealth::Stopped);
+            return ServerResult::UserStopped;
         }
 
-        let _ = health_tx.send_replace(ServerHealth::Starting);
-        let env_vars = match resolve_server_env(&config).await {
-            Ok(vars) => vars,
-            Err(err) => {
-                let _ = health_tx.send_replace(ServerHealth::Degraded {
-                    restarts: restart_count,
-                    last_error: err.to_string(),
-                });
-                return ServerResult::SpawnError(err);
-            }
+        let (mut child, pid, capture_task) = match try_spawn(
+            &name,
+            &config,
+            restart_count,
+            &health_tx,
+            &log_buffer,
+            &log_file,
+            &last_pid,
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(r) => return r,
         };
 
-        let parts = config.cmd_parts();
-        if parts.is_empty() {
-            let err = anyhow!("server '{}' command is empty", name);
+        let start = Instant::now();
+        loop {
+            tokio::select! {
+                status = child.wait() => {
+                    capture_task.abort();
+                    match status {
+                        Ok(exit) if exit.success() => {
+                            let _ = health_tx.send_replace(ServerHealth::Stopped);
+                            return ServerResult::CleanExit;
+                        }
+                        Ok(exit) => {
+                            restart_count += 1;
+                            let error = format!("exit code: {:?}", exit.code());
+                            let _ = health_tx.send_replace(ServerHealth::Degraded {
+                                restarts: restart_count,
+                                last_error: error,
+                            });
+                            if restart_count >= max_restarts {
+                                return ServerResult::MaxRestartsExceeded;
+                            }
+                            let backoff_secs =
+                                (1u64 << restart_count.min(5)).min(max_backoff.as_secs());
+                            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                            break; // restart outer loop
+                        }
+                        Err(err) => {
+                            let _ = health_tx.send_replace(ServerHealth::Degraded {
+                                restarts: restart_count,
+                                last_error: err.to_string(),
+                            });
+                            return ServerResult::SpawnError(err.into());
+                        }
+                    }
+                }
+                _ = shutdown.cancelled() => {
+                    capture_task.abort();
+                    let _ = child.kill().await;
+                    let _ = health_tx.send_replace(ServerHealth::Stopped);
+                    return ServerResult::Shutdown;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    let _ = health_tx.send_replace(ServerHealth::Running {
+                        pid,
+                        uptime_secs: start.elapsed().as_secs(),
+                        restarts: restart_count,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn is_stop_requested(name: &str) -> bool {
+    match user_stop_marker_path(name) {
+        Ok(marker) if marker.exists() => {
+            let _ = fs::remove_file(&marker);
+            true
+        }
+        _ => false,
+    }
+}
+
+async fn try_spawn(
+    name: &str,
+    config: &ServerConfig,
+    restart_count: u32,
+    health_tx: &watch::Sender<ServerHealth>,
+    log_buffer: &Arc<Mutex<VecDeque<LogLine>>>,
+    log_file: &Path,
+    last_pid: &Arc<Mutex<Option<u32>>>,
+) -> Result<(Child, u32, tokio::task::JoinHandle<()>), ServerResult> {
+    let _ = health_tx.send_replace(ServerHealth::Starting);
+
+    let env_vars = match resolve_server_env(config).await {
+        Ok(vars) => vars,
+        Err(err) => {
             let _ = health_tx.send_replace(ServerHealth::Degraded {
                 restarts: restart_count,
                 last_error: err.to_string(),
             });
-            return ServerResult::SpawnError(err);
+            return Err(ServerResult::SpawnError(err));
         }
+    };
 
-        let mut child = match Command::new(&parts[0])
-            .args(&parts[1..])
-            .envs(env_vars)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(err) => {
-                let _ = health_tx.send_replace(ServerHealth::Degraded {
-                    restarts: restart_count,
-                    last_error: err.to_string(),
-                });
-                return ServerResult::SpawnError(err.into());
-            }
-        };
-
-        let pid = match child.id() {
-            Some(p) => p,
-            None => {
-                let err = anyhow!(
-                    "failed to get PID for server '{}': process may have already exited",
-                    name
-                );
-                let _ = health_tx.send_replace(ServerHealth::Degraded {
-                    restarts: restart_count,
-                    last_error: err.to_string(),
-                });
-                return ServerResult::SpawnError(err);
-            }
-        };
-        {
-            let mut pid_lock = last_pid.lock().await;
-            *pid_lock = Some(pid);
-        }
-
-        let start_instant = Instant::now();
-        let _ = health_tx.send_replace(ServerHealth::Running {
-            pid,
-            uptime_secs: 0,
+    let parts = config.cmd_parts();
+    if parts.is_empty() {
+        let err = anyhow!("server '{}' command is empty", name);
+        let _ = health_tx.send_replace(ServerHealth::Degraded {
+            restarts: restart_count,
+            last_error: err.to_string(),
         });
-
-        let (stdout, stderr) = match (child.stdout.take(), child.stderr.take()) {
-            (Some(stdout), Some(stderr)) => (stdout, stderr),
-            _ => {
-                let err = anyhow!("failed to capture stdout/stderr for '{}'", name);
-                let _ = health_tx.send_replace(ServerHealth::Degraded {
-                    restarts: restart_count,
-                    last_error: err.to_string(),
-                });
-                return ServerResult::SpawnError(err);
-            }
-        };
-        let log_buffer_clone = log_buffer.clone();
-        let log_file_clone = log_file.clone();
-        let capture_task = tokio::spawn(async move {
-            let _ = capture_output(stdout, stderr, log_buffer_clone, log_file_clone).await;
-        });
-
-        tokio::select! {
-            status = child.wait() => {
-                capture_task.abort();
-                match status {
-                    Ok(exit) if exit.success() => {
-                        let _ = health_tx.send_replace(ServerHealth::Stopped);
-                        return ServerResult::CleanExit;
-                    }
-                    Ok(exit) => {
-                        restart_count += 1;
-                        let error = format!("exit code: {:?}", exit.code());
-                        let _ = health_tx.send_replace(ServerHealth::Degraded {
-                            restarts: restart_count,
-                            last_error: error.clone(),
-                        });
-                        if restart_count >= 5 {
-                            return ServerResult::MaxRestartsExceeded;
-                        }
-                        let backoff_secs = (1u64 << restart_count.min(5)).min(max_backoff.as_secs());
-                        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                    }
-                    Err(err) => {
-                        let _ = health_tx.send_replace(ServerHealth::Degraded {
-                            restarts: restart_count,
-                            last_error: err.to_string(),
-                        });
-                        return ServerResult::SpawnError(err.into());
-                    }
-                }
-            }
-            _ = shutdown.cancelled() => {
-                let _ = child.kill().await;
-                let _ = health_tx.send_replace(ServerHealth::Stopped);
-                return ServerResult::Shutdown;
-            }
-            _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                let uptime_secs = start_instant.elapsed().as_secs();
-                let _ = health_tx.send_replace(ServerHealth::Running {
-                    pid,
-                    uptime_secs,
-                });
-            }
-        }
+        return Err(ServerResult::SpawnError(err));
     }
+
+    let mut child = match Command::new(&parts[0])
+        .args(&parts[1..])
+        .envs(env_vars)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(err) => {
+            let _ = health_tx.send_replace(ServerHealth::Degraded {
+                restarts: restart_count,
+                last_error: err.to_string(),
+            });
+            return Err(ServerResult::SpawnError(err.into()));
+        }
+    };
+
+    let pid = match child.id() {
+        Some(p) => p,
+        None => {
+            let err = anyhow!(
+                "failed to get PID for server '{}': process may have already exited",
+                name
+            );
+            let _ = health_tx.send_replace(ServerHealth::Degraded {
+                restarts: restart_count,
+                last_error: err.to_string(),
+            });
+            return Err(ServerResult::SpawnError(err));
+        }
+    };
+
+    *last_pid.lock().await = Some(pid);
+    let _ = health_tx.send_replace(ServerHealth::Running {
+        pid,
+        uptime_secs: 0,
+        restarts: restart_count,
+    });
+
+    let (stdout, stderr) = match (child.stdout.take(), child.stderr.take()) {
+        (Some(out), Some(err)) => (out, err),
+        _ => {
+            let err = anyhow!("failed to capture stdout/stderr for '{}'", name);
+            let _ = health_tx.send_replace(ServerHealth::Degraded {
+                restarts: restart_count,
+                last_error: err.to_string(),
+            });
+            // Kill the already-spawned child to avoid orphaned processes.
+            let _ = child.kill().await;
+            return Err(ServerResult::SpawnError(err));
+        }
+    };
+
+    let buf = log_buffer.clone();
+    let lf = log_file.to_path_buf();
+    let capture = tokio::spawn(async move {
+        let _ = capture_output(stdout, stderr, buf, lf).await;
+    });
+
+    Ok((child, pid, capture))
 }
 
 async fn capture_output(
@@ -513,11 +563,15 @@ impl ServerHealth {
                 restarts: 0,
                 last_error: None,
             },
-            ServerHealth::Running { pid, uptime_secs } => ServerState {
+            ServerHealth::Running {
+                pid,
+                uptime_secs,
+                restarts,
+            } => ServerState {
                 status: "running".to_owned(),
                 pid: Some(*pid),
                 uptime_secs: Some(*uptime_secs),
-                restarts: 0,
+                restarts: *restarts,
                 last_error: None,
             },
             ServerHealth::Degraded {

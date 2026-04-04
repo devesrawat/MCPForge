@@ -39,8 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/devesrawat/MCPForge/main/install.sh
 ### Homebrew (after first tagged release)
 
 ```bash
-brew tap devesrawat/mcp-forge
-brew install mcp-forge
+brew install devesrawat/mcp-forge/mcp-forge
 ```
 
 ### Build from source

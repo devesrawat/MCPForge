@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -31,13 +31,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install system dependencies
-        run: sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update -y && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
   test:
     needs: lint
@@ -62,7 +62,7 @@ jobs:
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update -y && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Run tests
         run: cargo test --all --locked

@@ -57,6 +57,10 @@ pub struct ServerConfig {
     /// Optional estimated USD cost per tool call (for `forge report`).
     #[serde(default)]
     pub estimated_cost_per_call_usd: Option<f64>,
+
+    /// Maximum number of consecutive restarts before giving up (default: 5).
+    #[serde(default)]
+    pub max_restarts: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -149,8 +153,14 @@ impl ForgeConfig {
     }
 
     pub fn save_to_file(&self, path: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
+        let path = path.as_ref();
         let text = toml::to_string_pretty(self)?;
-        std::fs::write(path.as_ref(), text)?;
+        let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let tmp = dir.join(format!(".forge_cfg_tmp_{}", std::process::id()));
+        std::fs::write(&tmp, &text)
+            .with_context(|| format!("failed to write temp file {}", tmp.display()))?;
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("failed to rename temp file to {}", path.display()))?;
         Ok(())
     }
 }

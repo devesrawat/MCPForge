@@ -55,6 +55,7 @@ async fn start_all_creates_state_file_for_true_server() {
                 env: HashMap::new(),
                 ready_timeout_secs: None,
                 estimated_cost_per_call_usd: None,
+                max_restarts: None,
             },
         )]
         .into_iter()
