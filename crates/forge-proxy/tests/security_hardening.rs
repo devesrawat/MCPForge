@@ -379,7 +379,7 @@ deny_tools = ["admin_*"]
     }
 
     #[tokio::test]
-    async fn sse_session_endpoint_event_and_message_round_trip() {
+    async fn sse_connect_returns_ok_with_event_stream_content_type() {
         let state = make_state(
             r#"
 [server.local]

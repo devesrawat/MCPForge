@@ -34,12 +34,14 @@ pub trait McpTransport: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct MockMcpTransport {
     pub tools: Arc<Vec<String>>,
+    pub call_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl MockMcpTransport {
     pub fn new<T: Into<Vec<String>>>(tools: T) -> Self {
         MockMcpTransport {
             tools: Arc::new(tools.into()),
+            call_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 }
@@ -47,6 +49,8 @@ impl MockMcpTransport {
 #[async_trait]
 impl McpTransport for MockMcpTransport {
     async fn list_tools(&self) -> Result<Vec<String>> {
+        self.call_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(self.tools.as_ref().clone())
     }
 
@@ -373,18 +377,23 @@ mod tests {
 
     #[tokio::test]
     async fn stale_cache_returns_immediately_and_triggers_background_refresh() {
+        let transport = Arc::new(MockMcpTransport::new(vec!["build".to_string()]));
+        let call_count = transport.call_count.clone();
+
         let mut transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
-        transports.insert(
-            "local".to_string(),
-            Arc::new(MockMcpTransport::new(vec!["build".to_string()])),
-        );
+        transports.insert("local".to_string(), transport);
 
         // Create registry with a 1ms TTL so the cache expires immediately.
         let registry = ToolRegistry::with_options(transports, Duration::from_millis(1));
 
-        // Prime the cache.
+        // Prime the cache (1st transport call).
         let first = registry.list_tools("local").await.unwrap();
         assert_eq!(first, vec!["build"]);
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "expected one transport call to prime the cache"
+        );
 
         // Wait for TTL to elapse.
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -397,7 +406,12 @@ mod tests {
         // Allow the background refresh to complete.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Cache should now be fresh again (elapsed < 1ms TTL not yet expired).
+        // Verify the background refresh actually called the transport a second time.
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "expected a second transport call from the background refresh"
+        );
         assert!(!registry.cache.is_empty());
     }
 }

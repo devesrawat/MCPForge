@@ -17,20 +17,19 @@ fn wait_for_events(reader: &AuditReader, min_count: usize) -> Vec<forge_core::au
     }
 }
 
-fn setup() -> (AuditWriter, AuditReader) {
+fn setup() -> (AuditWriter, AuditReader, NamedTempFile) {
     let file = NamedTempFile::new().unwrap();
     let path = file.path().to_path_buf();
-    // Keep file alive via the path; NamedTempFile is dropped but path persists on disk
-    // until the returned objects are dropped.
-    std::mem::forget(file);
     let writer = AuditWriter::new(&path).unwrap();
     let reader = AuditReader::open(&path).unwrap();
-    (writer, reader)
+    // Return the NamedTempFile so the caller keeps it alive; it is cleaned up
+    // automatically when the returned tuple is dropped at the end of the test.
+    (writer, reader, file)
 }
 
 #[test]
 fn filter_by_server() {
-    let (writer, reader) = setup();
+    let (writer, reader, _file) = setup();
     writer.log(AuditEvent::new(
         "alpha",
         "tool1",
@@ -69,7 +68,7 @@ fn filter_by_server() {
 
 #[test]
 fn filter_by_tool() {
-    let (writer, reader) = setup();
+    let (writer, reader, _file) = setup();
     writer.log(AuditEvent::new(
         "srv",
         "build",
@@ -107,7 +106,7 @@ fn filter_by_tool() {
 
 #[test]
 fn filter_errors_only() {
-    let (writer, reader) = setup();
+    let (writer, reader, _file) = setup();
     writer.log(AuditEvent::new("srv", "ok", &Value::Null, 0, 5, None, None));
     writer.log(AuditEvent::new(
         "srv",
@@ -138,7 +137,7 @@ fn filter_errors_only() {
 
 #[test]
 fn limit_is_respected() {
-    let (writer, reader) = setup();
+    let (writer, reader, _file) = setup();
     for i in 0..10 {
         writer.log(AuditEvent::new(
             "srv",
@@ -160,7 +159,7 @@ fn limit_is_respected() {
 
 #[test]
 fn results_ordered_newest_first() {
-    let (writer, reader) = setup();
+    let (writer, reader, _file) = setup();
     writer.log(AuditEvent::new(
         "srv",
         "first",

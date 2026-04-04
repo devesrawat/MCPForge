@@ -280,6 +280,7 @@ async fn run_server_loop(
                     }
                 }
                 _ = shutdown.cancelled() => {
+                    capture_task.abort();
                     let _ = child.kill().await;
                     let _ = health_tx.send_replace(ServerHealth::Stopped);
                     return ServerResult::Shutdown;
@@ -386,6 +387,8 @@ async fn try_spawn(
                 restarts: restart_count,
                 last_error: err.to_string(),
             });
+            // Kill the already-spawned child to avoid orphaned processes.
+            let _ = child.kill().await;
             return Err(ServerResult::SpawnError(err));
         }
     };
