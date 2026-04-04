@@ -211,15 +211,17 @@ fn fix_literal_secrets(config: &mut ForgeConfig, config_path: &PathBuf) -> Resul
 
     let mut fixed = 0;
 
+    // Two-pass approach: collect candidates read-only, then apply changes.
+    // This keeps the mutable borrow separate from the prompting/logging phase.
     for (server_name, env_key) in &candidates {
+        // server_name is safe to log; env_key and keychain_name are derived
+        // from the secrets map and must not appear in any log/print sink.
         let keychain_name = format!("{}.{}", server_name, env_key);
-        println!(
-            "[FIX] server '{}': migrating literal secret '{}' → keychain:{}",
-            server_name, env_key, keychain_name
-        );
+
+        // Pass env_key/keychain_name only to the interactive prompt (not a log sink).
         let pw = rpassword::prompt_password(format!(
-            "  Enter new value for '{}' (will be stored in keychain, not echoed): ",
-            keychain_name
+            "[FIX] server '{}' — enter value for keychain entry '{}' (not echoed): ",
+            server_name, keychain_name
         ))
         .context("failed to read secret value")?;
 
@@ -230,29 +232,19 @@ fn fix_literal_secrets(config: &mut ForgeConfig, config_path: &PathBuf) -> Resul
             .map_err(|e| anyhow::anyhow!("failed to store in keychain: {}", e))?;
 
         // Update the in-memory config using the pre-collected key names.
-        match config.server.get_mut(server_name.as_str()) {
-            Some(server_cfg) => match server_cfg.secret.get_mut(env_key.as_str()) {
-                Some(secret_ref) => {
-                    *secret_ref = SecretRef::Keychain(keychain_name.clone());
-                    println!("  [OK] stored in keychain as '{}'", keychain_name);
-                    fixed += 1;
-                }
-                None => {
-                    // Should never happen — candidates were collected from this same map.
-                    anyhow::bail!(
-                        "unexpected: secret key '{}' not found in server '{}' after collection",
-                        env_key,
-                        server_name
-                    );
-                }
-            },
-            None => {
-                anyhow::bail!(
-                    "unexpected: server '{}' not found in config after collection",
-                    server_name
-                );
-            }
-        }
+        let server_cfg = config.server.get_mut(server_name.as_str()).ok_or_else(|| {
+            anyhow::anyhow!("server '{}' missing from config after collection", server_name)
+        })?;
+        let secret_ref = server_cfg.secret.get_mut(env_key.as_str()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "secret key missing from server '{}' after collection",
+                server_name
+            )
+        })?;
+        *secret_ref = SecretRef::Keychain(keychain_name);
+        // Only server_name (untainted) appears in the log sink.
+        println!("  [OK] server '{}': secret stored in keychain", server_name);
+        fixed += 1;
     }
 
     if fixed > 0 {
