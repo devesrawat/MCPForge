@@ -1,5 +1,8 @@
 # MCP Forge
 
+[![CI](https://github.com/devesrawat/MCPForge/actions/workflows/ci.yml/badge.svg)](https://github.com/devesrawat/MCPForge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENCE)
+
 MCP Forge is a Rust CLI and local proxy that helps you run and govern multiple MCP servers through one endpoint.
 
 It focuses on practical operations: process supervision, tool namespacing, policy enforcement, rate and cost guards, and audit visibility.
@@ -11,35 +14,18 @@ It focuses on practical operations: process supervision, tool namespacing, polic
 - Operational controls (rate limits, daily caps, status, logs, restart).
 - Audit trail and reports for usage and latency insights.
 
-## Current Status
-
-- Language: Rust (workspace)
-- License: MIT
-- Primary branch: `development`
-- Project plan: [PLAN.md](PLAN.md)
-
-## Features
-
-- Multi-server proxy with namespaced tools (`server__tool`).
-- Supervisor lifecycle commands: start, stop, restart, status, logs.
-- Config and secret workflows: init, add/remove/list, keychain/env checks.
-- Guard controls: prompt injection mode (`warn` or `block`), per-server rate limit (`max_calls_per_min`), and per-server daily cap (`max_calls_per_day`).
-- RBAC-style tool policy (`allowed_tools`, `deny_tools`, deny wins).
-- SQLite audit storage and summary reporting.
-- Discovery endpoint: `/.well-known/mcp-servers.json`.
-
 ## Installation
+
+### Homebrew
+
+```bash
+brew install devesrawat/mcp-forge/mcp-forge
+```
 
 ### Shell installer
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/devesrawat/MCPForge/main/install.sh | sh
-```
-
-### Homebrew (after first tagged release)
-
-```bash
-brew install devesrawat/mcp-forge/mcp-forge
 ```
 
 ### Build from source
@@ -48,9 +34,10 @@ brew install devesrawat/mcp-forge/mcp-forge
 git clone https://github.com/devesrawat/MCPForge.git
 cd MCPForge
 cargo build --release --bin forge
+cp target/release/forge ~/.local/bin/
 ```
 
-### Cargo install (local repo path)
+### Cargo install
 
 ```bash
 cargo install --path crates/forge-cli
@@ -78,15 +65,11 @@ forge status
 
 ### 4) Connect your MCP client
 
-Use:
-
 ```text
 http://127.0.0.1:3456
 ```
 
 ## Real-Life Usage Examples
-
-These examples show when MCP Forge is useful and how a new user can apply it immediately.
 
 ### Example 1: Run multiple MCP servers behind one endpoint
 
@@ -173,11 +156,9 @@ forge logs github --follow
 forge stop
 ```
 
-What you get: clear operational lifecycle for local MCP infrastructure.
-
 ## Configuration
 
-Start from [forge.toml.example](forge.toml.example).
+Start from [forge.toml.example](forge.toml.example) or run `forge init` to generate a config.
 
 Minimal example:
 
@@ -207,30 +188,21 @@ forge check
 
 ## CLI Commands
 
-Core commands currently available:
-
-- `forge init`
-- `forge add`
-- `forge ls`
-- `forge remove`
-- `forge start`
-- `forge stop`
-- `forge restart`
-- `forge status [--watch] [--json]`
-- `forge logs <server> [--follow] [--lines N]`
-- `forge secret <set|ls|rm|check>`
-- `forge check`
-- `forge audit`
-- `forge report`
-
-## Project Layout
-
-- `crates/forge-cli` - CLI entrypoint and command handlers.
-- `crates/forge-core` - config, supervisor, protocol, secrets, audit.
-- `crates/forge-proxy` - axum JSON-RPC proxy and guard logic.
-- `crates/forge-mock-mcp` - mock MCP server for local tests.
-- `forge.toml.example` - sample config.
-- `RELEASE.md` - release runbook and rollback guide.
+| Command | Description |
+|---------|-------------|
+| `forge init` | Generate a starter `forge.toml` |
+| `forge add <name> --cmd <cmd>` | Register a new MCP server |
+| `forge remove <name>` | Remove a registered server |
+| `forge ls` | List all configured servers |
+| `forge start` | Start all servers and the proxy |
+| `forge stop` | Stop all servers and the proxy |
+| `forge restart [name]` | Restart one or all servers |
+| `forge status [--watch] [--json]` | Show server health |
+| `forge logs <name> [--follow] [--lines N]` | Stream or tail server logs |
+| `forge secret <set\|ls\|rm\|check>` | Manage secrets in keychain/env |
+| `forge check` | Validate config and secrets |
+| `forge audit` | Query the audit event log |
+| `forge report` | Summarise usage and latency |
 
 ## Security Model
 
@@ -238,15 +210,26 @@ Core commands currently available:
 - Request size and timeout constraints in proxy.
 - Optional injection checks for arguments and results.
 - Policy deny events are audit logged.
-- Secrets resolved via env/keychain references.
+- Secrets resolved via env/keychain references — never stored in plaintext.
 
-Note: Guards are disabled by default (`guard.enabled = false`). Set `guard.enabled = true` to enable injection, rate, and cost guard checks. RBAC policy enforcement always applies regardless of this setting.
+**Guards are disabled by default** (`guard.enabled = false`). Set `guard.enabled = true` to enable injection, rate, and cost guard checks. RBAC policy enforcement (`allowed_tools`, `deny_tools`) always applies regardless of this setting.
+
+## Project Layout
+
+```
+crates/
+  forge-cli/    CLI entrypoint and command handlers
+  forge-core/   Config, supervisor, protocol, secrets, audit
+  forge-proxy/  Axum JSON-RPC proxy and guard logic
+  forge-mock-mcp/ Mock MCP server for local tests
+forge.toml.example  Sample configuration
+```
 
 ## Development
 
 ### Prerequisites
 
-- Rust stable toolchain
+- Rust stable toolchain (`rustup install stable`)
 - `cargo`
 
 ### Build
@@ -255,32 +238,26 @@ Note: Guards are disabled by default (`guard.enabled = false`). Set `guard.enabl
 cargo build --workspace
 ```
 
-### Validate
+### Test
+
+```bash
+cargo test --all
+```
+
+### Lint
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all
 ```
-
-## Release
-
-Tag-driven release workflow:
-
-- Workflow: [.github/workflows/release.yml](.github/workflows/release.yml)
-- Runbook: [RELEASE.md](RELEASE.md)
-- Real-life release examples: [RELEASE.md#real-life-examples](RELEASE.md#real-life-examples)
-- Helper script: `./scripts/release-tag.sh vX.Y.Z`
-
-## Roadmap
-
-Execution plan and milestones are documented in [PLAN.md](PLAN.md).
 
 ## Contributing
 
-Contribution basics are in [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-If you submit code changes, please include tests and keep `fmt`, `clippy`, and `test` green.
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
