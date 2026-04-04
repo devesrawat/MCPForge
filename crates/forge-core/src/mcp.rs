@@ -403,14 +403,26 @@ mod tests {
         let second = registry.list_tools("local").await.unwrap();
         assert_eq!(second, vec!["build"]);
 
-        // Allow the background refresh to complete.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Poll for the background refresh to complete (bounded timeout avoids
+        // flakiness on slow CI while not blocking indefinitely).
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        loop {
+            if call_count.load(std::sync::atomic::Ordering::SeqCst) >= 2 {
+                break;
+            }
+            let now = tokio::time::Instant::now();
+            assert!(
+                now < deadline,
+                "timed out waiting for background refresh"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
 
         // Verify the background refresh actually called the transport a second time.
         assert_eq!(
             call_count.load(std::sync::atomic::Ordering::SeqCst),
             2,
-            "expected a second transport call from the background refresh"
+            "expected exactly 2 transport calls (1 initial + 1 background refresh)"
         );
         assert!(!registry.cache.is_empty());
     }

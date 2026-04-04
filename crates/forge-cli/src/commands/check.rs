@@ -8,7 +8,10 @@ use std::path::PathBuf;
 #[derive(Debug, Args)]
 #[command(about = "Validate forge.toml configuration")]
 pub struct Check {
-    #[arg(long, help = "Fix common issues automatically")]
+    #[arg(
+        long,
+        help = "Fix common issues automatically. Prompts interactively for each secret value; requires a terminal and is not suitable for CI/non-interactive environments."
+    )]
     pub fix: bool,
 }
 
@@ -183,32 +186,71 @@ pub fn run_checks(config: &ForgeConfig) -> (usize, usize) {
 
 /// Migrate all literal secrets to the system keychain and rewrite forge.toml.
 /// Returns the number of secrets migrated. Prompts interactively for each value.
+///
+/// # Non-interactive environments
+///
+/// This function uses `rpassword` to prompt for each secret on the terminal.
+/// It is not suitable for CI or scripts — run it manually in a terminal session
+/// before deploying to automated environments.
 fn fix_literal_secrets(config: &mut ForgeConfig, config_path: &PathBuf) -> Result<usize> {
+    // Collect the (server_name, env_key) pairs for literal secrets using a
+    // read-only iteration, so the key names are separated from the secret
+    // values before any printing or prompting takes place.
+    let candidates: Vec<(String, String)> = config
+        .server
+        .iter()
+        .flat_map(|(server_name, server_cfg)| {
+            server_cfg
+                .secret
+                .iter()
+                .filter(|(_, secret_ref)| matches!(secret_ref, SecretRef::Literal(_)))
+                .map(|(env_key, _)| (server_name.clone(), env_key.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     let mut fixed = 0;
 
-    for (server_name, server_cfg) in config.server.iter_mut() {
-        for (env_key, secret_ref) in server_cfg.secret.iter_mut() {
-            if let SecretRef::Literal(_) = secret_ref {
-                let keychain_name = format!("{}.{}", server_name, env_key);
-                println!(
-                    "[FIX] server '{}': migrating literal secret '{}' → keychain:{}",
-                    server_name, env_key, keychain_name
+    for (server_name, env_key) in &candidates {
+        let keychain_name = format!("{}.{}", server_name, env_key);
+        println!(
+            "[FIX] server '{}': migrating literal secret '{}' → keychain:{}",
+            server_name, env_key, keychain_name
+        );
+        let pw = rpassword::prompt_password(format!(
+            "  Enter new value for '{}' (will be stored in keychain, not echoed): ",
+            keychain_name
+        ))
+        .context("failed to read secret value")?;
+
+        let entry = Entry::new("mcp-forge", &keychain_name)
+            .map_err(|e| anyhow::anyhow!("keychain entry error: {}", e))?;
+        entry
+            .set_password(&pw)
+            .map_err(|e| anyhow::anyhow!("failed to store in keychain: {}", e))?;
+
+        // Update the in-memory config using the pre-collected key names.
+        match config.server.get_mut(server_name.as_str()) {
+            Some(server_cfg) => match server_cfg.secret.get_mut(env_key.as_str()) {
+                Some(secret_ref) => {
+                    *secret_ref = SecretRef::Keychain(keychain_name.clone());
+                    println!("  [OK] stored in keychain as '{}'", keychain_name);
+                    fixed += 1;
+                }
+                None => {
+                    // Should never happen — candidates were collected from this same map.
+                    anyhow::bail!(
+                        "unexpected: secret key '{}' not found in server '{}' after collection",
+                        env_key,
+                        server_name
+                    );
+                }
+            },
+            None => {
+                anyhow::bail!(
+                    "unexpected: server '{}' not found in config after collection",
+                    server_name
                 );
-                let pw = rpassword::prompt_password(format!(
-                    "  Enter new value for '{}' (will be stored in keychain, not echoed): ",
-                    keychain_name
-                ))
-                .context("failed to read secret value")?;
-
-                let entry = Entry::new("mcp-forge", &keychain_name)
-                    .map_err(|e| anyhow::anyhow!("keychain entry error: {}", e))?;
-                entry
-                    .set_password(&pw)
-                    .map_err(|e| anyhow::anyhow!("failed to store in keychain: {}", e))?;
-
-                *secret_ref = SecretRef::Keychain(keychain_name.clone());
-                println!("  [OK] stored in keychain as '{}'", keychain_name);
-                fixed += 1;
             }
         }
     }
