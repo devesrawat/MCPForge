@@ -217,7 +217,10 @@ fn fix_literal_secrets(config: &mut ForgeConfig, config_path: &PathBuf) -> Resul
         config
             .save_to_file(config_path)
             .context("failed to save updated forge.toml")?;
-        println!("\nUpdated forge.toml: {} literal secret(s) migrated to keychain.\n", fixed);
+        println!(
+            "\nUpdated forge.toml: {} literal secret(s) migrated to keychain.\n",
+            fixed
+        );
     }
 
     Ok(fixed)

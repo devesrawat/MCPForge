@@ -31,8 +31,24 @@ fn setup() -> (AuditWriter, AuditReader) {
 #[test]
 fn filter_by_server() {
     let (writer, reader) = setup();
-    writer.log(AuditEvent::new("alpha", "tool1", &Value::Null, 0, 10, None, None));
-    writer.log(AuditEvent::new("beta", "tool2", &Value::Null, 0, 10, None, None));
+    writer.log(AuditEvent::new(
+        "alpha",
+        "tool1",
+        &Value::Null,
+        0,
+        10,
+        None,
+        None,
+    ));
+    writer.log(AuditEvent::new(
+        "beta",
+        "tool2",
+        &Value::Null,
+        0,
+        10,
+        None,
+        None,
+    ));
     drop(writer);
 
     let all = wait_for_events(&reader, 2);
@@ -40,7 +56,10 @@ fn filter_by_server() {
 
     let alpha = reader
         .query_events(
-            AuditQuery { server: Some("alpha".to_owned()), ..Default::default() },
+            AuditQuery {
+                server: Some("alpha".to_owned()),
+                ..Default::default()
+            },
             None,
         )
         .unwrap();
@@ -51,15 +70,34 @@ fn filter_by_server() {
 #[test]
 fn filter_by_tool() {
     let (writer, reader) = setup();
-    writer.log(AuditEvent::new("srv", "build", &Value::Null, 0, 5, None, None));
-    writer.log(AuditEvent::new("srv", "test", &Value::Null, 0, 5, None, None));
+    writer.log(AuditEvent::new(
+        "srv",
+        "build",
+        &Value::Null,
+        0,
+        5,
+        None,
+        None,
+    ));
+    writer.log(AuditEvent::new(
+        "srv",
+        "test",
+        &Value::Null,
+        0,
+        5,
+        None,
+        None,
+    ));
     drop(writer);
 
     wait_for_events(&reader, 2);
 
     let build_only = reader
         .query_events(
-            AuditQuery { tool: Some("build".to_owned()), ..Default::default() },
+            AuditQuery {
+                tool: Some("build".to_owned()),
+                ..Default::default()
+            },
             None,
         )
         .unwrap();
@@ -85,7 +123,13 @@ fn filter_errors_only() {
     wait_for_events(&reader, 2);
 
     let errors = reader
-        .query_events(AuditQuery { errors_only: true, ..Default::default() }, None)
+        .query_events(
+            AuditQuery {
+                errors_only: true,
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].tool, "fail");
@@ -110,19 +154,33 @@ fn limit_is_respected() {
 
     wait_for_events(&reader, 10);
 
-    let limited = reader
-        .query_events(AuditQuery::default(), Some(3))
-        .unwrap();
+    let limited = reader.query_events(AuditQuery::default(), Some(3)).unwrap();
     assert_eq!(limited.len(), 3);
 }
 
 #[test]
 fn results_ordered_newest_first() {
     let (writer, reader) = setup();
-    writer.log(AuditEvent::new("srv", "first", &Value::Null, 0, 1, None, None));
+    writer.log(AuditEvent::new(
+        "srv",
+        "first",
+        &Value::Null,
+        0,
+        1,
+        None,
+        None,
+    ));
     // Small sleep to ensure distinct timestamps.
     std::thread::sleep(Duration::from_millis(5));
-    writer.log(AuditEvent::new("srv", "second", &Value::Null, 0, 1, None, None));
+    writer.log(AuditEvent::new(
+        "srv",
+        "second",
+        &Value::Null,
+        0,
+        1,
+        None,
+        None,
+    ));
     drop(writer);
 
     let events = wait_for_events(&reader, 2);

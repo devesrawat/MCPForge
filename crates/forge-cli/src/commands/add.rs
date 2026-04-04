@@ -74,7 +74,10 @@ mod tests {
     use tempfile::TempDir;
 
     fn add(name: &str, cmd: &str) -> Add {
-        Add { name: name.to_owned(), cmd: cmd.to_owned() }
+        Add {
+            name: name.to_owned(),
+            cmd: cmd.to_owned(),
+        }
     }
 
     #[test]

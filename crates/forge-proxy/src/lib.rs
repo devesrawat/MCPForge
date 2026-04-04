@@ -7,7 +7,6 @@ use axum::{
 };
 
 pub mod sse;
-pub use sse::SessionStore;
 use chrono::Datelike;
 use dashmap::DashMap;
 use forge_core::audit::{AuditEvent, AuditWriter};
@@ -19,6 +18,7 @@ use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+pub use sse::SessionStore;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -334,7 +334,10 @@ async fn handle_tools_call(
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| ProxyError::invalid_params("missing tool name"))?;
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
 
     scan_args_for_injection(state, &args)?;
 
@@ -359,7 +362,15 @@ async fn handle_tools_call(
         Ok(_) => (0, None),
         Err(e) => (-1, Some(e.to_string())),
     };
-    write_audit_event(state, server, orig_tool, &args, result_code, latency_ms, error);
+    write_audit_event(
+        state,
+        server,
+        orig_tool,
+        &args,
+        result_code,
+        latency_ms,
+        error,
+    );
 
     result.map_err(ProxyError::internal)
 }
@@ -462,7 +473,15 @@ fn write_audit_event(
     error: Option<String>,
 ) {
     if let Some(aw) = &state.audit {
-        aw.log(AuditEvent::new(server, tool, args, result_code, latency_ms, error, None));
+        aw.log(AuditEvent::new(
+            server,
+            tool,
+            args,
+            result_code,
+            latency_ms,
+            error,
+            None,
+        ));
     }
 }
 
@@ -503,11 +522,11 @@ impl ProxyError {
 
     pub fn code(&self) -> i32 {
         match self {
-            ProxyError::InvalidParams(_) => -32602,    // JSON-RPC: Invalid params
-            ProxyError::MethodNotFound(_) => -32601,   // JSON-RPC: Method not found
-            ProxyError::Internal(_) => -32603,         // JSON-RPC: Internal error
-            ProxyError::RateLimited(_) => -32000,      // App: rate limited
-            ProxyError::PolicyDenied(_) => -32001,     // App: policy denied
+            ProxyError::InvalidParams(_) => -32602, // JSON-RPC: Invalid params
+            ProxyError::MethodNotFound(_) => -32601, // JSON-RPC: Method not found
+            ProxyError::Internal(_) => -32603,      // JSON-RPC: Internal error
+            ProxyError::RateLimited(_) => -32000,   // App: rate limited
+            ProxyError::PolicyDenied(_) => -32001,  // App: policy denied
             ProxyError::InjectionDetected(_) => -32002, // App: security violation
         }
     }
