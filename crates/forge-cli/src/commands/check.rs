@@ -233,7 +233,10 @@ fn fix_literal_secrets(config: &mut ForgeConfig, config_path: &PathBuf) -> Resul
 
         // Update the in-memory config using the pre-collected key names.
         let server_cfg = config.server.get_mut(server_name.as_str()).ok_or_else(|| {
-            anyhow::anyhow!("server '{}' missing from config after collection", server_name)
+            anyhow::anyhow!(
+                "server '{}' missing from config after collection",
+                server_name
+            )
         })?;
         let secret_ref = server_cfg.secret.get_mut(env_key.as_str()).ok_or_else(|| {
             anyhow::anyhow!(

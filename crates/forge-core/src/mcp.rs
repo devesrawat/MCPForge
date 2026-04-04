@@ -411,10 +411,7 @@ mod tests {
                 break;
             }
             let now = tokio::time::Instant::now();
-            assert!(
-                now < deadline,
-                "timed out waiting for background refresh"
-            );
+            assert!(now < deadline, "timed out waiting for background refresh");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
