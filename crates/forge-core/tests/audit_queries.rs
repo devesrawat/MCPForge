@@ -98,7 +98,7 @@ fn limit_is_respected() {
     for i in 0..10 {
         writer.log(AuditEvent::new(
             "srv",
-            &format!("tool{}", i),
+            format!("tool{i}"),
             &Value::Null,
             0,
             1,
