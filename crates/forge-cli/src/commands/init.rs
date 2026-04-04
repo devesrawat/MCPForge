@@ -67,6 +67,7 @@ impl Init {
                     env: HashMap::new(),
                     ready_timeout_secs: None,
                     estimated_cost_per_call_usd: None,
+                    max_restarts: None,
                 },
             );
             println!("Added server '{}'", name.trim());

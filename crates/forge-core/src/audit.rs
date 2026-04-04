@@ -157,13 +157,11 @@ impl AuditWriter {
         Self::migrate_schema(&conn)?;
 
         let (tx, rx) = channel::<AuditEvent>();
-        let db_path_clone = db_path.clone();
 
         thread::Builder::new()
             .name("forge-audit-writer".to_string())
             .spawn(move || {
-                let mut conn = Connection::open(&db_path_clone)
-                    .expect("failed to open audit database in writer thread");
+                let mut conn = conn;
 
                 while let Ok(event) = rx.recv() {
                     let mut batch = vec![event];

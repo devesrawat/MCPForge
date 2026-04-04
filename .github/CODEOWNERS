@@ -1,10 +1,3 @@
-# Default ownership
+# All files are owned by the project maintainer
+
 * @devesrawat
-
-# CI and release workflows
-/.github/workflows/* @devesrawat
-
-# Rust crates
-/crates/forge-cli/** @devesrawat
-/crates/forge-core/** @devesrawat
-/crates/forge-proxy/** @devesrawat

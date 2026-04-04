@@ -17,7 +17,7 @@ pub enum InjectionMode {
 
 #[derive(Debug)]
 pub struct InjectionDetector {
-    patterns: Vec<Regex>,
+    patterns: &'static [Regex],
     mode: InjectionMode,
 }
 
@@ -57,14 +57,14 @@ impl InjectionDetector {
     /// Create a new injection detector
     pub fn new(mode: InjectionMode) -> Self {
         Self {
-            patterns: get_patterns().to_vec(),
+            patterns: get_patterns(),
             mode,
         }
     }
 
     /// Scan a string for injection patterns
     pub fn scan(&self, input: &str) -> Option<InjectionAlert> {
-        for pattern in &self.patterns {
+        for pattern in self.patterns {
             if let Some(m) = pattern.find(input) {
                 return Some(InjectionAlert {
                     matched_pattern: m.as_str().to_owned(),

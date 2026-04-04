@@ -5,6 +5,9 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+
+pub mod sse;
+pub use sse::SessionStore;
 use chrono::Datelike;
 use dashmap::DashMap;
 use forge_core::audit::{AuditEvent, AuditWriter};
@@ -97,6 +100,8 @@ pub struct ProxyAppState {
     pub cost_guard: Arc<CostGuard>,
     pub policies: Arc<HashMap<String, RbacPolicy>>,
     pub injection_detector: Arc<InjectionDetector>,
+    /// Active SSE sessions: session_id → sender for SSE event messages.
+    pub sessions: SessionStore,
 }
 
 impl ProxyAppState {
@@ -131,6 +136,7 @@ impl ProxyAppState {
             cost_guard: Arc::new(CostGuard::new()),
             policies: Arc::new(policies),
             injection_detector: Arc::new(InjectionDetector::new(injection_mode)),
+            sessions: Arc::new(DashMap::new()),
         })
     }
 }
@@ -198,8 +204,9 @@ pub fn build_router(state: ProxyAppState) -> Router {
     Router::new()
         .route("/", post(handle_mcp_request))
         .route("/.well-known/mcp-servers.json", get(handle_well_known))
-        .route("/sse", get(legacy_sse_info))
-        .route("/messages", post(legacy_sse_info))
+        // Legacy SSE transport (MCP 2024-11-05 §3.2)
+        .route("/sse", get(sse::handle_sse_connect))
+        .route("/messages", post(sse::handle_sse_message))
         // Security hardening: 10MB request limit and 60s timeout
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(TimeoutLayer::with_status_code(
@@ -235,13 +242,6 @@ async fn handle_well_known(State(state): State<ProxyAppState>) -> impl IntoRespo
     });
 
     (StatusCode::OK, Json(response))
-}
-
-async fn legacy_sse_info() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        "legacy SSE transport is not implemented; use POST / (streamable HTTP JSON-RPC)",
-    )
 }
 
 async fn handle_mcp_request(
@@ -334,44 +334,74 @@ async fn handle_tools_call(
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| ProxyError::invalid_params("missing tool name"))?;
-    let args = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
 
-    if state.config.guard.enabled {
-        // Scan arguments for prompt injection
-        if let Some(alert) = state.injection_detector.scan_arguments(&args) {
-            tracing::warn!(
-                matched_pattern = alert.matched_pattern,
-                position = alert.position,
-                "prompt injection detected in tool arguments"
-            );
-
-            if state.injection_detector.mode() == InjectionMode::Block {
-                return Err(ProxyError::injection_detected(
-                    "Potential prompt injection detected in arguments",
-                ));
-            }
-        }
-    }
+    scan_args_for_injection(state, &args)?;
 
     let (server, orig_tool) = forge_core::protocol::parse_namespaced_tool(tool_name)
         .ok_or_else(|| ProxyError::invalid_params("tool name must be server__tool"))?;
 
+    tracing::Span::current().record("server", server);
+    tracing::Span::current().record("tool", orig_tool);
+
+    check_policy_and_guards(state, server, orig_tool, &args)?;
+
+    let start = Instant::now();
+    let result = state.registry.call_tool(tool_name, args.clone()).await;
+    let latency_ms = start.elapsed().as_millis() as u64;
+    tracing::Span::current().record("latency_ms", latency_ms);
+
+    if let Ok(ref v) = result {
+        scan_result_for_injection(state, v)?;
+    }
+
+    let (result_code, error) = match &result {
+        Ok(_) => (0, None),
+        Err(e) => (-1, Some(e.to_string())),
+    };
+    write_audit_event(state, server, orig_tool, &args, result_code, latency_ms, error);
+
+    result.map_err(ProxyError::internal)
+}
+
+fn scan_args_for_injection(state: &ProxyAppState, args: &Value) -> Result<(), ProxyError> {
+    if !state.config.guard.enabled {
+        return Ok(());
+    }
+    if let Some(alert) = state.injection_detector.scan_arguments(args) {
+        tracing::warn!(
+            matched_pattern = alert.matched_pattern,
+            position = alert.position,
+            "prompt injection detected in tool arguments"
+        );
+        if state.injection_detector.mode() == InjectionMode::Block {
+            return Err(ProxyError::injection_detected(
+                "Potential prompt injection detected in arguments",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_policy_and_guards(
+    state: &ProxyAppState,
+    server: &str,
+    orig_tool: &str,
+    args: &Value,
+) -> Result<(), ProxyError> {
+    // RBAC is always enforced, independent of guard.enabled.
     if let Some(policy) = state.policies.get(server) {
         if !policy.is_allowed(orig_tool) {
-            if let Some(audit_writer) = &state.audit {
-                let event = AuditEvent::new(
+            if let Some(aw) = &state.audit {
+                aw.log(AuditEvent::new(
                     server,
                     orig_tool,
-                    &args,
+                    args,
                     -403,
                     0,
                     Some("tool blocked by policy".to_owned()),
                     None,
-                );
-                audit_writer.log(event);
+                ));
             }
             return Err(ProxyError::policy_denied(format!(
                 "tool '{}' blocked by policy for server '{}'",
@@ -380,11 +410,13 @@ async fn handle_tools_call(
         }
     }
 
-    if state.config.guard.enabled {
-        if let Some(lim) = state.rate_limiters.get(server) {
-            if lim.check().is_err() {
-                return Err(ProxyError::rate_limited(server));
-            }
+    if !state.config.guard.enabled {
+        return Ok(());
+    }
+
+    if let Some(lim) = state.rate_limiters.get(server) {
+        if lim.check().is_err() {
+            return Err(ProxyError::rate_limited(server));
         }
     }
 
@@ -393,51 +425,45 @@ async fn handle_tools_call(
         .server
         .get(server)
         .ok_or_else(|| ProxyError::internal(anyhow::anyhow!("unknown server {}", server)))?;
+    state
+        .cost_guard
+        .check(server, srv_cfg.max_calls_per_day)
+        .map_err(ProxyError::internal)?;
 
-    if state.config.guard.enabled {
-        state
-            .cost_guard
-            .check(server, srv_cfg.max_calls_per_day)
-            .map_err(ProxyError::internal)?;
+    Ok(())
+}
+
+fn scan_result_for_injection(state: &ProxyAppState, result: &Value) -> Result<(), ProxyError> {
+    if !state.config.guard.enabled {
+        return Ok(());
     }
-
-    let start = Instant::now();
-    let result = state.registry.call_tool(tool_name, args.clone()).await;
-    let latency_ms = start.elapsed().as_millis() as u64;
-
-    tracing::Span::current().record("latency_ms", latency_ms);
-    tracing::Span::current().record("server", server);
-    tracing::Span::current().record("tool", orig_tool);
-
-    // Scan tool result for indirect prompt injection
-    if state.config.guard.enabled {
-        if let Ok(ref result_value) = result {
-            if let Some(alert) = state.injection_detector.scan_result(result_value) {
-                tracing::warn!(
-                    matched_pattern = alert.matched_pattern,
-                    position = alert.position,
-                    "prompt injection detected in tool result (indirect injection)"
-                );
-
-                if state.injection_detector.mode() == InjectionMode::Block {
-                    return Err(ProxyError::injection_detected(
-                        "Potential prompt injection detected in tool result",
-                    ));
-                }
-            }
+    if let Some(alert) = state.injection_detector.scan_result(result) {
+        tracing::warn!(
+            matched_pattern = alert.matched_pattern,
+            position = alert.position,
+            "prompt injection detected in tool result (indirect injection)"
+        );
+        if state.injection_detector.mode() == InjectionMode::Block {
+            return Err(ProxyError::injection_detected(
+                "Potential prompt injection detected in tool result",
+            ));
         }
     }
+    Ok(())
+}
 
-    if let Some(audit_writer) = &state.audit {
-        if let Some((s, t)) = forge_core::protocol::parse_namespaced_tool(tool_name) {
-            let error = result.as_ref().err().map(|e| e.to_string());
-            let result_code = if result.is_ok() { 0 } else { -1 };
-            let event = AuditEvent::new(s, t, &args, result_code, latency_ms, error, None);
-            audit_writer.log(event);
-        }
+fn write_audit_event(
+    state: &ProxyAppState,
+    server: &str,
+    tool: &str,
+    args: &Value,
+    result_code: i32,
+    latency_ms: u64,
+    error: Option<String>,
+) {
+    if let Some(aw) = &state.audit {
+        aw.log(AuditEvent::new(server, tool, args, result_code, latency_ms, error, None));
     }
-
-    result.map_err(ProxyError::internal)
 }
 
 #[derive(Debug)]
@@ -477,12 +503,12 @@ impl ProxyError {
 
     pub fn code(&self) -> i32 {
         match self {
-            ProxyError::InvalidParams(_) => -32602,
-            ProxyError::MethodNotFound(_) => -32601,
-            ProxyError::RateLimited(_) => -32_000,
-            ProxyError::PolicyDenied(_) => -32_000,
-            ProxyError::InjectionDetected(_) => -32_000,
-            ProxyError::Internal(_) => -32_000,
+            ProxyError::InvalidParams(_) => -32602,    // JSON-RPC: Invalid params
+            ProxyError::MethodNotFound(_) => -32601,   // JSON-RPC: Method not found
+            ProxyError::Internal(_) => -32603,         // JSON-RPC: Internal error
+            ProxyError::RateLimited(_) => -32000,      // App: rate limited
+            ProxyError::PolicyDenied(_) => -32001,     // App: policy denied
+            ProxyError::InjectionDetected(_) => -32002, // App: security violation
         }
     }
 }

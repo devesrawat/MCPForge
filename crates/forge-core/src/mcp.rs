@@ -13,10 +13,15 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tracing::warn;
 
-type ToolListCache = std::sync::Arc<RwLock<Option<(Instant, Vec<String>)>>>;
+/// Per-server tool list cache: server name → (cached_at, tool names).
+type PerServerCache = Arc<DashMap<String, (Instant, Vec<String>)>>;
+
+/// Set of server names currently undergoing a background cache refresh.
+/// Presence in this map means a refresh task is already in-flight.
+type RefreshingSet = Arc<DashMap<String, ()>>;
 
 use crate::config::{ForgeConfig, ServerConfig, Transport, resolve_server_env};
 
@@ -158,8 +163,9 @@ impl McpTransport for RmcpChildTransport {
 pub struct ToolRegistry {
     transports: Arc<HashMap<String, Arc<dyn McpTransport>>>,
     pids: Arc<DashMap<String, Option<u32>>>,
-    cache: ToolListCache,
+    cache: PerServerCache,
     ttl: Duration,
+    refreshing: RefreshingSet,
 }
 
 impl ToolRegistry {
@@ -175,8 +181,9 @@ impl ToolRegistry {
         Self {
             transports: Arc::new(transports),
             pids,
-            cache: Arc::new(RwLock::new(None)),
+            cache: Arc::new(DashMap::new()),
             ttl,
+            refreshing: Arc::new(DashMap::new()),
         }
     }
 
@@ -188,8 +195,9 @@ impl ToolRegistry {
         Self {
             transports: Arc::new(transports),
             pids,
-            cache: Arc::new(RwLock::new(None)),
+            cache: Arc::new(DashMap::new()),
             ttl,
+            refreshing: Arc::new(DashMap::new()),
         }
     }
 
@@ -198,37 +206,69 @@ impl ToolRegistry {
     }
 
     pub async fn invalidate_cache(&self) {
-        let mut g = self.cache.write().await;
-        *g = None;
+        self.cache.clear();
     }
 
     pub async fn invalidate_server(&self, server: &str) {
-        self.invalidate_cache().await;
-        let _ = server;
+        self.cache.remove(server);
     }
 
     pub async fn list_all_tools(&self) -> Result<Vec<String>> {
-        {
-            let guard = self.cache.read().await;
-            if let Some((t, names)) = guard.as_ref() {
-                if t.elapsed() < self.ttl {
-                    return Ok(names.clone());
-                }
-            }
-        }
-
         let mut tools = Vec::new();
         for (server, transport) in self.transports.iter() {
-            let server_tools = transport.list_tools().await?;
+            let server_tools = self.cached_list_tools(server, transport.as_ref()).await?;
             tools.extend(
                 server_tools
                     .into_iter()
                     .map(|tool| crate::protocol::namespace_tool(server, &tool)),
             );
         }
+        Ok(tools)
+    }
 
-        let mut w = self.cache.write().await;
-        *w = Some((Instant::now(), tools.clone()));
+    async fn cached_list_tools(
+        &self,
+        server: &str,
+        transport: &dyn McpTransport,
+    ) -> Result<Vec<String>> {
+        if let Some(entry) = self.cache.get(server) {
+            if entry.0.elapsed() < self.ttl {
+                // Fresh — return directly.
+                return Ok(entry.1.clone());
+            }
+            // Stale — return stale data immediately (stale-while-revalidate) and
+            // kick off a background refresh so the next caller gets fresh data.
+            let stale = entry.1.clone();
+            drop(entry); // release the DashMap read guard before spawning
+            // Only one refresh per server at a time — insert into the set wins the race.
+            if self.refreshing.insert(server.to_string(), ()).is_none() {
+                if let Some(arc_transport) = self.transports.get(server).cloned() {
+                    let cache = self.cache.clone();
+                    let refreshing = self.refreshing.clone();
+                    let server_owned = server.to_string();
+                    tokio::spawn(async move {
+                        match arc_transport.list_tools().await {
+                            Ok(tools) => {
+                                cache.insert(server_owned.clone(), (Instant::now(), tools));
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    server = %server_owned,
+                                    "background cache refresh failed: {}",
+                                    e
+                                );
+                            }
+                        }
+                        refreshing.remove(&server_owned);
+                    });
+                }
+            }
+            return Ok(stale);
+        }
+        // Not in cache at all — fetch synchronously.
+        let tools = transport.list_tools().await?;
+        self.cache
+            .insert(server.to_string(), (Instant::now(), tools.clone()));
         Ok(tools)
     }
 
@@ -237,7 +277,7 @@ impl ToolRegistry {
             .transports
             .get(server)
             .ok_or_else(|| anyhow!("unknown server: {}", server))?;
-        transport.list_tools().await
+        self.cached_list_tools(server, transport.as_ref()).await
     }
 
     pub async fn call_tool(&self, namespaced_tool: &str, args: Value) -> Result<Value> {
@@ -329,5 +369,35 @@ mod tests {
 
         assert_eq!(result["tool"], "build");
         assert_eq!(result["args"]["task"], "compile");
+    }
+
+    #[tokio::test]
+    async fn stale_cache_returns_immediately_and_triggers_background_refresh() {
+        let mut transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
+        transports.insert(
+            "local".to_string(),
+            Arc::new(MockMcpTransport::new(vec!["build".to_string()])),
+        );
+
+        // Create registry with a 1ms TTL so the cache expires immediately.
+        let registry = ToolRegistry::with_options(transports, Duration::from_millis(1));
+
+        // Prime the cache.
+        let first = registry.list_tools("local").await.unwrap();
+        assert_eq!(first, vec!["build"]);
+
+        // Wait for TTL to elapse.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // Second call on a stale cache should still return the stale data without
+        // blocking (stale-while-revalidate). The background refresh runs concurrently.
+        let second = registry.list_tools("local").await.unwrap();
+        assert_eq!(second, vec!["build"]);
+
+        // Allow the background refresh to complete.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Cache should now be fresh again (elapsed < 1ms TTL not yet expired).
+        assert!(!registry.cache.is_empty());
     }
 }

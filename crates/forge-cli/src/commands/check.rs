@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Args;
-use forge_core::config::ForgeConfig;
+use forge_core::config::{ForgeConfig, SecretRef};
+use keyring::Entry;
 use std::net::TcpListener;
 use std::path::PathBuf;
 
@@ -18,7 +19,7 @@ impl Check {
             anyhow::bail!("no forge.toml found in current directory");
         }
 
-        let config = ForgeConfig::load_from_file(&config_path)
+        let mut config = ForgeConfig::load_from_file(&config_path)
             .with_context(|| format!("failed to parse config file {}", config_path.display()))?;
 
         println!(
@@ -27,7 +28,10 @@ impl Check {
         );
 
         if self.fix {
-            anyhow::bail!("--fix is not implemented yet; run without --fix for read-only checks");
+            let fixed = fix_literal_secrets(&mut config, &config_path)?;
+            if fixed == 0 {
+                println!("Nothing to fix.\n");
+            }
         }
 
         let (error_count, warning_count) = run_checks(&config);
@@ -175,6 +179,48 @@ pub fn run_checks(config: &ForgeConfig) -> (usize, usize) {
     println!();
 
     (error_count, warning_count)
+}
+
+/// Migrate all literal secrets to the system keychain and rewrite forge.toml.
+/// Returns the number of secrets migrated. Prompts interactively for each value.
+fn fix_literal_secrets(config: &mut ForgeConfig, config_path: &PathBuf) -> Result<usize> {
+    let mut fixed = 0;
+
+    for (server_name, server_cfg) in config.server.iter_mut() {
+        for (env_key, secret_ref) in server_cfg.secret.iter_mut() {
+            if let SecretRef::Literal(_) = secret_ref {
+                let keychain_name = format!("{}.{}", server_name, env_key);
+                println!(
+                    "[FIX] server '{}': migrating literal secret '{}' → keychain:{}",
+                    server_name, env_key, keychain_name
+                );
+                let pw = rpassword::prompt_password(format!(
+                    "  Enter new value for '{}' (will be stored in keychain, not echoed): ",
+                    keychain_name
+                ))
+                .context("failed to read secret value")?;
+
+                let entry = Entry::new("mcp-forge", &keychain_name)
+                    .map_err(|e| anyhow::anyhow!("keychain entry error: {}", e))?;
+                entry
+                    .set_password(&pw)
+                    .map_err(|e| anyhow::anyhow!("failed to store in keychain: {}", e))?;
+
+                *secret_ref = SecretRef::Keychain(keychain_name.clone());
+                println!("  [OK] stored in keychain as '{}'", keychain_name);
+                fixed += 1;
+            }
+        }
+    }
+
+    if fixed > 0 {
+        config
+            .save_to_file(config_path)
+            .context("failed to save updated forge.toml")?;
+        println!("\nUpdated forge.toml: {} literal secret(s) migrated to keychain.\n", fixed);
+    }
+
+    Ok(fixed)
 }
 
 #[cfg(test)]
