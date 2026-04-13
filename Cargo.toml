@@ -58,7 +58,7 @@ globset = "0.4"
 dialoguer = "0.12"
 rpassword = "7"
 futures = "0.3"
-rmcp = { version = "1.3", default-features = false, features = [
+rmcp = { version = "1.4", default-features = false, features = [
     "client",
     "transport-child-process",
 ] }
