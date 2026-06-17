@@ -11,6 +11,7 @@ pub mod secret;
 pub mod start;
 pub mod status;
 pub mod stop;
+pub mod watch;
 
 pub use add::Add;
 pub use audit::Audit;
@@ -25,3 +26,4 @@ pub use secret::Secret;
 pub use start::Start;
 pub use status::Status;
 pub use stop::Stop;
+pub use watch::Watch;

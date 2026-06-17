@@ -5,7 +5,7 @@ mod commands;
 #[cfg(feature = "otlp")]
 mod telemetry;
 use commands::{
-    Add, Audit, Check, Init, Logs, Ls, Remove, Report, Restart, Secret, Start, Status, Stop,
+    Add, Audit, Check, Init, Logs, Ls, Remove, Report, Restart, Secret, Start, Status, Stop, Watch,
 };
 
 #[derive(Debug, Parser)]
@@ -31,6 +31,7 @@ enum Commands {
     Restart(Restart),
     Status(Status),
     Logs(Logs),
+    Watch(Watch),
 }
 
 fn main() -> Result<()> {
@@ -60,5 +61,6 @@ fn main() -> Result<()> {
         Commands::Restart(cmd) => cmd.run(),
         Commands::Status(cmd) => cmd.run(),
         Commands::Logs(cmd) => cmd.run(),
+        Commands::Watch(cmd) => cmd.run(),
     }
 }
