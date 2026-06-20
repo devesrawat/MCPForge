@@ -27,14 +27,17 @@
 ## File Structure
 
 **Phase 1 — Hardening**
+
 - Modify: `crates/forge-core/src/mcp.rs` — reduce default TTL to 60s, document env var
 - Modify: `crates/forge-proxy/tests/security_hardening.rs` — add cost guard boundary test + proxy E2E test
 
 **Phase 2 — Schema Passthrough**
+
 - Modify: `crates/forge-core/src/mcp.rs` — add `ToolInfo` struct, update `McpTransport` trait, update all impls, update `ToolRegistry` cache type
 - Modify: `crates/forge-proxy/src/lib.rs` — update `handle_tools_list` to emit real schemas
 
 **Phase 3 — HTTP Transport**
+
 - Modify: `crates/forge-core/src/config/mod.rs` — add `Transport::Sse`, `ServerConfig.url`, `ProxyConfig.auth_token`, config validation
 - Modify: `crates/forge-core/src/mcp.rs` — add `HttpMcpTransport`, add `LegacySseMcpTransport`, update `build_tool_registry` dispatch
 - Modify: `crates/forge-core/src/config/validation.rs` — validate `url` required for http/sse, `cmd` required for stdio
@@ -44,6 +47,7 @@
 - Modify: `Cargo.toml` (workspace) — add reqwest with stream, subtle
 
 **Phase 4 — Proxy Auth**
+
 - Modify: `crates/forge-core/src/config/mod.rs` — `ProxyConfig.auth_token: Option<SecretRef>`
 - Create: `crates/forge-proxy/src/auth.rs` — `AuthLayer` Tower middleware
 - Modify: `crates/forge-proxy/src/lib.rs` — wire `AuthLayer`, add startup warning
@@ -54,9 +58,11 @@
 ## Task 1: Phase 1 — Cache TTL Fix (M6)
 
 **Files:**
+
 - Modify: `crates/forge-core/src/mcp.rs:305` — change default TTL from 300 to 60 seconds
 
 **Interfaces:**
+
 - Produces: `FORGE_TOOL_CACHE_TTL_SECS` env var documented; default 60s
 
 - [ ] **Step 1: Write the failing test**
@@ -138,180 +144,104 @@ git commit -m "fix: reduce default tool cache TTL to 60s (M6 — stale cache on 
 ## Task 2: Phase 1 — Proxy E2E Round-Trip Test
 
 **Files:**
+
 - Modify: `crates/forge-proxy/tests/security_hardening.rs` — add E2E test using `MockMcpTransport`
 
 **Interfaces:**
+
 - Consumes: `MockMcpTransport::new`, `ToolRegistry::new`, `build_router`, `ProxyAppState` from `forge_proxy`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
-Open `crates/forge-proxy/tests/security_hardening.rs`. At the top, confirm existing imports include `forge_proxy::build_router`. Then add at the bottom of the file (before the closing `}`):
+Open `crates/forge-proxy/tests/security_hardening.rs`. The file already has a `make_state(toml, server, tools)` async helper and `post_rpc(state, body)` helper — use them directly. Add at the bottom of the file (inside the `mod tests` block, before the closing `}`):
 
 ```rust
 #[tokio::test]
 async fn test_proxy_e2e_tools_list_returns_namespaced_tools() {
-    use axum::body::Body;
-    use http::{Method, Request, StatusCode};
-    use tower::ServiceExt;
+    let state = make_state(
+        r#"
+[server.test_server]
+cmd = "true"
+"#,
+        "test_server",
+        vec!["echo", "ping"],
+    )
+    .await;
+    let resp = post_rpc(
+        state,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+        }),
+    )
+    .await;
 
-    let transport = forge_core::mcp::MockMcpTransport::new(vec![
-        "echo".to_string(),
-        "ping".to_string(),
-    ]);
-    let mut transports: std::collections::HashMap<
-        String,
-        std::sync::Arc<dyn forge_core::mcp::McpTransport>,
-    > = std::collections::HashMap::new();
-    transports.insert("test_server".to_string(), std::sync::Arc::new(transport));
-    let registry = forge_core::mcp::ToolRegistry::new(transports);
-
-    let state = forge_proxy::test_helpers::make_state_with_registry(registry);
-    let app = forge_proxy::build_router(state);
-
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/list"
-    });
-    let req = Request::builder()
-        .method(Method::POST)
-        .uri("/")
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_string(&body).unwrap()))
-        .unwrap();
-
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let tools = json["result"]["tools"].as_array().unwrap();
+    let tools = resp["result"]["tools"].as_array().expect("tools array");
     let names: Vec<&str> = tools
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"test_server__echo"));
-    assert!(names.contains(&"test_server__ping"));
+    assert!(names.contains(&"test_server__echo"), "got: {:?}", names);
+    assert!(names.contains(&"test_server__ping"), "got: {:?}", names);
 }
 
 #[tokio::test]
 async fn test_proxy_e2e_rate_limit_returns_32000() {
-    use axum::body::Body;
-    use http::{Method, Request, StatusCode};
-    use tower::ServiceExt;
+    let state = make_state(
+        r#"
+[guard]
+enabled = true
 
-    // Configure server with max 1 call per minute
-    let transport = forge_core::mcp::MockMcpTransport::new(vec!["echo".to_string()]);
-    let mut transports: std::collections::HashMap<
-        String,
-        std::sync::Arc<dyn forge_core::mcp::McpTransport>,
-    > = std::collections::HashMap::new();
-    transports.insert("rate_srv".to_string(), std::sync::Arc::new(transport));
-    let registry = forge_core::mcp::ToolRegistry::new(transports);
-
-    let state = forge_proxy::test_helpers::make_state_with_registry_and_rate_limit(
-        registry,
+[server.rate_srv]
+cmd = "true"
+max_calls_per_min = 1
+"#,
         "rate_srv",
-        1, // max_calls_per_min = 1
-    );
-    let app = forge_proxy::build_router(state);
+        vec!["echo"],
+    )
+    .await;
 
-    let call_body = serde_json::json!({
+    // Share state via build_router so the rate-limiter persists across calls.
+    let app = build_router(state);
+
+    let call_body = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/call",
         "params": { "name": "rate_srv__echo", "arguments": {} }
     });
 
-    // First call should succeed
     let req1 = Request::builder()
-        .method(Method::POST)
+        .method("POST")
         .uri("/")
         .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_string(&call_body).unwrap()))
+        .body(Body::from(call_body.to_string()))
         .unwrap();
     let resp1 = app.clone().oneshot(req1).await.unwrap();
     assert_eq!(resp1.status(), StatusCode::OK);
 
-    // Second call should be rate-limited
     let req2 = Request::builder()
-        .method(Method::POST)
+        .method("POST")
         .uri("/")
         .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_string(&call_body).unwrap()))
+        .body(Body::from(call_body.to_string()))
         .unwrap();
     let resp2 = app.oneshot(req2).await.unwrap();
     assert_eq!(resp2.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp2.into_body(), usize::MAX)
-        .await
-        .unwrap();
+    let bytes = to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json["error"]["code"], -32000);
 }
 ```
 
-- [ ] **Step 2: Add `test_helpers` module to `forge-proxy/src/lib.rs`**
-
-These tests require helper functions that expose internal state construction for tests. Add at the bottom of `crates/forge-proxy/src/lib.rs`:
-
-```rust
-#[cfg(test)]
-pub mod test_helpers {
-    use super::*;
-    use forge_core::mcp::ToolRegistry;
-    use std::sync::Arc;
-
-    pub fn make_state_with_registry(registry: ToolRegistry) -> ProxyAppState {
-        ProxyAppState {
-            registry: Arc::new(registry),
-            config: Arc::new(ForgeConfig::parse_str("").unwrap_or_default()),
-            audit: crate::audit_stub(),
-            rate_limiters: Arc::new(dashmap::DashMap::new()),
-            cost_guard: Arc::new(crate::CostGuard::new()),
-            policies: Arc::new(forge_core::config::RbacPolicy::default()),
-            injection_detector: Arc::new(crate::InjectionDetector::default()),
-            sessions: Arc::new(dashmap::DashMap::new()),
-        }
-    }
-
-    pub fn make_state_with_registry_and_rate_limit(
-        registry: ToolRegistry,
-        server_name: &str,
-        max_per_min: u32,
-    ) -> ProxyAppState {
-        use governor::{Quota, RateLimiter};
-        use nonzero_ext::nonzero;
-        let rate_limiters = Arc::new(dashmap::DashMap::new());
-        let quota = Quota::per_minute(
-            std::num::NonZeroU32::new(max_per_min).unwrap_or(nonzero!(1u32)),
-        );
-        let limiter = Arc::new(RateLimiter::direct(quota));
-        rate_limiters.insert(server_name.to_string(), limiter);
-        ProxyAppState {
-            registry: Arc::new(registry),
-            config: Arc::new(ForgeConfig::parse_str("").unwrap_or_default()),
-            audit: crate::audit_stub(),
-            rate_limiters,
-            cost_guard: Arc::new(crate::CostGuard::new()),
-            policies: Arc::new(forge_core::config::RbacPolicy::default()),
-            injection_detector: Arc::new(crate::InjectionDetector::default()),
-            sessions: Arc::new(dashmap::DashMap::new()),
-        }
-    }
-}
-```
-
-Note: Check actual field names of `ProxyAppState` in `crates/forge-proxy/src/lib.rs` and adjust the helper to match.
-
-- [ ] **Step 3: Run test to verify it fails with the right error**
+- [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
 cargo test -p forge-proxy test_proxy_e2e -- --nocapture 2>&1 | head -30
 ```
 
-Expected: compile error about `test_helpers` missing, or test failure about missing fields. Fix compilation errors by adjusting `make_state_with_registry` to match the actual `ProxyAppState` fields.
+Expected: compile error or test failure — `MockMcpTransport::list_tools` returns `Vec<String>` not `Vec<ToolInfo>` (that's fixed in Task 3), or both tests pass if list_tools already returns correct data. If compilation fails, check that `build_router` and `to_bytes` are already in scope in the test file (they are, from the existing imports at the top of the test module).
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -339,9 +269,11 @@ git commit -m "test: add proxy E2E round-trip tests (tools/list, rate-limit -320
 ## Task 3: Phase 2 — `ToolInfo` Type + Updated `McpTransport` Trait
 
 **Files:**
+
 - Modify: `crates/forge-core/src/mcp.rs` — add `ToolInfo`, change `McpTransport::list_tools` return type, update all impls
 
 **Interfaces:**
+
 - Produces:
   - `ToolInfo { name: String, description: Option<String>, input_schema: serde_json::Value }` (public, in `forge_core::mcp`)
   - `McpTransport::list_tools(&self) -> Result<Vec<ToolInfo>>`
@@ -580,9 +512,11 @@ git commit -m "feat: add ToolInfo type and update McpTransport trait for schema 
 ## Task 4: Phase 2 — Proxy Response Emits Real Schemas
 
 **Files:**
+
 - Modify: `crates/forge-proxy/src/lib.rs` — update `handle_tools_list` to serialize full `ToolInfo`
 
 **Interfaces:**
+
 - Consumes: `ToolInfo { name, description, input_schema }` from `forge_core::mcp`
 - Produces: JSON `tools/list` response with real `description` and `inputSchema` per tool
 
@@ -717,10 +651,12 @@ git commit -m "feat: proxy tools/list now returns real description and inputSche
 ## Task 5: Phase 3 — Config: `Transport::Sse`, `ServerConfig.url`, Validation
 
 **Files:**
+
 - Modify: `crates/forge-core/src/config/mod.rs` — add `Transport::Sse`, make `cmd` optional, add `url: Option<String>`
 - Modify: `crates/forge-core/src/config/validation.rs` — validate url/cmd constraints per transport
 
 **Interfaces:**
+
 - Produces:
   - `Transport` enum: `Stdio | Http | Sse` (serde values: `"stdio"`, `"http"`, `"sse"`)
   - `ServerConfig.cmd: Option<String>` (breaking change — update all callsites)
@@ -867,6 +803,7 @@ grep -rn "\.cmd\b\|cmd_parts\|\.cmd\.as_str\|\.cmd\.is_empty" crates/ --include=
 Key callsite: `crates/forge-core/src/supervisor/mod.rs` and `crates/forge-core/src/mcp.rs`. Update each to use `server_cfg.cmd_parts()` or `server_cfg.cmd.as_deref().unwrap_or("")`.
 
 In `crates/forge-cli/src/commands/check.rs`, the check for empty command:
+
 ```rust
 let parts = server_config.cmd_parts();
 if parts.is_empty() && server_config.transport == Transport::Stdio {
@@ -895,10 +832,12 @@ git commit -m "feat: add Transport::Sse variant and ServerConfig.url field (Phas
 ## Task 6: Phase 3 — `HttpMcpTransport` (Streamable HTTP)
 
 **Files:**
+
 - Modify: `Cargo.toml` (workspace) — add `transport-streamable-http-client-reqwest` to rmcp features
 - Modify: `crates/forge-core/src/mcp.rs` — add `HttpMcpTransport` struct
 
 **Interfaces:**
+
 - Produces:
   - `HttpMcpTransport::connect_streamable(url: &str, headers: HashMap<HeaderName, HeaderValue>) -> Result<Self>`
   - Implements `McpTransport` — identical `list_tools` and `call_tool` body to `RmcpChildTransport`
@@ -1049,10 +988,12 @@ git commit -m "feat: add HttpMcpTransport for Streamable HTTP (Phase 3)"
 ## Task 7: Phase 3 — `LegacySseMcpTransport` (Legacy SSE)
 
 **Files:**
+
 - Modify: `Cargo.toml` (workspace) — add `reqwest` with `stream` feature
 - Modify: `crates/forge-core/src/mcp.rs` — add `LegacySseMcpTransport`
 
 **Interfaces:**
+
 - Produces:
   - `LegacySseMcpTransport::connect(url: &str, headers: HashMap<HeaderName, HeaderValue>) -> Result<Self>`
   - Implements `McpTransport` — `list_tools` and `call_tool` using JSON-RPC over SSE
@@ -1137,17 +1078,18 @@ impl LegacySseMcpTransport {
             return Err(anyhow!("SSE server returned {}", resp.status()));
         }
 
-        // Parse the SSE stream to find the endpoint event.
-        let stream = SseStream::from_byte_stream(resp.bytes_stream());
-        tokio::pin!(stream);
+        // Box::pin (not tokio::pin!) so the stream is heap-allocated and can be
+        // moved into the tokio::spawn task after we extract the endpoint event.
+        let mut stream = Box::pin(SseStream::from_byte_stream(resp.bytes_stream()));
 
         let mut messages_url = None;
-        // Read events until we get the endpoint.
+        // Read events until we get the endpoint. The same stream is then moved
+        // into the background task — do NOT reconnect (session ID is in the URL).
         while let Some(event) = stream.next().await {
             let event = event.map_err(|e| anyhow!("SSE parse error: {}", e))?;
             if event.event.as_deref() == Some("endpoint") {
                 let data = event.data.unwrap_or_default();
-                // The endpoint may be relative (e.g., /messages) or absolute.
+                // The endpoint may be relative (e.g., /messages?sessionId=X) or absolute.
                 messages_url = Some(if data.starts_with("http") {
                     data
                 } else {
@@ -1163,25 +1105,19 @@ impl LegacySseMcpTransport {
             anyhow!("SSE server did not send an 'endpoint' event")
         })?;
 
-        // Re-open the SSE stream for ongoing events (the first stream was consumed above).
-        let mut req2 = client.get(url);
-        for (k, v) in &headers {
-            req2 = req2.header(k.clone(), v.clone());
-        }
-        req2 = req2.header(reqwest::header::ACCEPT, "text/event-stream");
-        let resp2 = req2.send().await.map_err(|e| anyhow!("SSE reconnect failed: {}", e))?;
+        // IMPORTANT: Do NOT reconnect. The session ID (if any) in messages_url is bound
+        // to this exact SSE connection. All JSON-RPC responses arrive on this same stream.
+        // Pass the already-open stream into the background reader task.
 
         let pending: Arc<PendingMap<u64, oneshot::Sender<Result<serde_json::Value>>>> =
             Arc::new(PendingMap::new());
         let pending_clone = pending.clone();
 
-        // Spawn background task to route SSE events to pending response channels.
+        // Move the original stream into the background task.
+        // `stream` has consumed the `endpoint` event; all subsequent events
+        // are `message` events with JSON-RPC responses.
         tokio::spawn(async move {
-            use futures::StreamExt;
-            use sse_stream::SseStream;
-            let event_stream = SseStream::from_byte_stream(resp2.bytes_stream());
-            tokio::pin!(event_stream);
-            while let Some(Ok(event)) = event_stream.next().await {
+            while let Some(Ok(event)) = stream.next().await {
                 if event.event.as_deref() == Some("message") {
                     if let Some(data) = event.data {
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
@@ -1194,10 +1130,7 @@ impl LegacySseMcpTransport {
                     }
                 }
             }
-            // Connection closed — fail any remaining pending requests.
-            for entry in pending_clone.iter() {
-                // Can't send on a reference, drain on drop.
-            }
+            // Connection closed — clear pending requests so callers get channel-closed errors.
             pending_clone.clear();
         });
 
@@ -1289,6 +1222,7 @@ sse-stream = { version = "0.2" }
 ```
 
 Check the exact version available:
+
 ```bash
 grep "sse.stream\|sse_stream" /Users/prognosticator/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rmcp-1.3.0/Cargo.toml
 ```
@@ -1321,9 +1255,11 @@ git commit -m "feat: add LegacySseMcpTransport for legacy SSE (MCP 2024-11-05)"
 ## Task 8: Phase 3 — Wire HTTP Transports into `build_tool_registry`
 
 **Files:**
+
 - Modify: `crates/forge-core/src/mcp.rs` — update `build_tool_registry` to dispatch `Http` and `Sse` variants
 
 **Interfaces:**
+
 - Consumes: `ServerConfig.url`, `ServerConfig.secret` (resolved to HTTP headers), `Transport::Http`, `Transport::Sse`
 - Produces: `build_tool_registry` supports all three transport types; empty-map guard updated to exclude HTTP servers
 
@@ -1426,10 +1362,12 @@ git commit -m "feat: wire Http and Sse transports into build_tool_registry (Phas
 ## Task 9: Phase 3 — `forge-mock-mcp` HTTP Mode + E2E Tests
 
 **Files:**
+
 - Modify: `crates/forge-mock-mcp/src/main.rs` — add `--http` flag for Streamable HTTP server
 - Create: `crates/forge-proxy/tests/http_transport.rs` — integration test for HTTP backend
 
 **Interfaces:**
+
 - Produces: `forge-mock-mcp --http 127.0.0.1:PORT --tools N` starts a Streamable HTTP MCP server
 
 - [ ] **Step 1: Add `rmcp` server features to forge-mock-mcp Cargo.toml**
@@ -1532,7 +1470,7 @@ async fn run_http_server(addr: &str, tool_count: usize) -> anyhow::Result<()> {
 
     let session_manager = Arc::new(LocalSessionManager::default());
     let tool_names: Vec<String> = (0..tool_count).map(|i| format!("tool_{}", i)).collect();
-    
+
     let service = StreamableHttpService::new(
         move || Ok(MockHandler::new(tool_names.clone())),
         session_manager,
@@ -1573,78 +1511,66 @@ git commit -m "feat: add forge-mock-mcp --http mode for Streamable HTTP E2E test
 
 ---
 
-## Task 10: Phase 4 — `ProxyConfig.auth_token` + `AuthLayer` Middleware
+## Task 10: Phase 4 — Auth Tests + Startup Warning
+
+> **Note:** `ProxyConfig.auth_token`, `crates/forge-proxy/src/auth.rs` (`AuthLayer` with constant-time comparison), and the `AuthLayer` wiring in `build_router` are **already implemented**. Verify by checking `crates/forge-proxy/src/auth.rs` and `lib.rs:241`. This task covers only the missing pieces: tests for the middleware and the non-loopback startup warning.
 
 **Files:**
-- Modify: `crates/forge-core/src/config/mod.rs` — add `auth_token: Option<SecretRef>` to `ProxyConfig`
-- Create: `crates/forge-proxy/src/auth.rs` — `AuthLayer` Tower middleware
-- Modify: `crates/forge-proxy/src/lib.rs` — wire `AuthLayer`, add startup warning
-- Modify: `Cargo.toml` workspace — add `subtle`
+
+- Modify: `crates/forge-proxy/tests/security_hardening.rs` — add 4 auth tests
+- Modify: `crates/forge-cli/src/commands/start.rs` — add startup warning for non-loopback + no auth
 
 **Interfaces:**
-- Produces:
-  - `ProxyConfig.auth_token: Option<SecretRef>` (resolved at startup to `Option<String>`)
-  - `AuthLayer::new(token: Option<String>)` — Tower layer, passes through if `None`
-  - `AuthLayer` returns `401 Unauthorized` for missing or wrong `Authorization: Bearer <token>` header
-  - `/.well-known/` path is exempt from auth
 
-- [ ] **Step 1: Add `subtle` to workspace**
+- Consumes: `ProxyAppState.auth_token: Option<String>` (public field), `build_router`, existing `make_state` helper in the test file
 
-In `/Users/prognosticator/Desktop/projects/mcp_forge/Cargo.toml`:
+- [ ] **Step 1: Verify auth implementation is in place**
 
-```toml
-subtle = "2"
+```bash
+grep -n "AuthLayer\|auth_token" crates/forge-proxy/src/lib.rs | head -10
+grep -n "struct AuthLayer" crates/forge-proxy/src/auth.rs
 ```
 
-Add to `crates/forge-proxy/Cargo.toml`:
+Expected: `AuthLayer` definition found in `auth.rs`, `AuthLayer::new(auth_token)` in `lib.rs`.
 
-```toml
-subtle = { workspace = true }
-```
+- [ ] **Step 2: Write the failing auth tests**
 
-- [ ] **Step 2: Add `auth_token` to `ProxyConfig`**
-
-In `crates/forge-core/src/config/mod.rs`:
+In `crates/forge-proxy/tests/security_hardening.rs`, add a local helper (alongside the existing `make_state`) and four tests inside the `mod tests` block:
 
 ```rust
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProxyConfig {
-    #[serde(default)]
-    pub enabled: bool,
+// Helper: build state with auth token set directly (no SecretRef resolution needed).
+// Mirrors the pattern of `make_state` above.
+fn make_state_with_auth_token(token: &str) -> ProxyAppState {
+    use forge_core::injection::{InjectionDetector, InjectionMode};
+    use forge_proxy::CostGuard;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use dashmap::DashMap;
+    use forge_core::config::ForgeConfig;
+    use forge_core::mcp::ToolRegistry;
 
-    #[serde(default = "default_proxy_bind")]
-    pub bind: String,
-
-    #[serde(default = "default_proxy_port")]
-    pub port: u16,
-
-    /// Optional Bearer token for proxy authentication.
-    /// If set, all requests (except /.well-known/) must include
-    /// `Authorization: Bearer <token>`.
-    #[serde(default)]
-    pub auth_token: Option<SecretRef>,
+    let cfg = ForgeConfig::parse_str("[server.dummy]\ncmd = \"true\"")
+        .expect("config parse");
+    ProxyAppState {
+        registry: Arc::new(ToolRegistry::new(HashMap::new())),
+        config: Arc::new(cfg),
+        audit: None,
+        rate_limiters: Arc::new(DashMap::new()),
+        cost_guard: Arc::new(CostGuard::new()),
+        policies: Arc::new(HashMap::new()),
+        injection_detector: Arc::new(InjectionDetector::new(InjectionMode::Warn)),
+        sessions: Arc::new(DashMap::new()),
+        auth_token: Some(token.to_string()),
+    }
 }
-```
 
-Update `Default` impl to include `auth_token: None`.
-
-- [ ] **Step 3: Write the failing auth tests**
-
-Add to `crates/forge-proxy/tests/security_hardening.rs`:
-
-```rust
 #[tokio::test]
-async fn test_auth_missing_token_returns_401() {
-    use axum::body::Body;
-    use http::{Method, Request, StatusCode};
-    use tower::ServiceExt;
-
-    let state = forge_proxy::test_helpers::make_state_with_auth("secret-token-abc");
-    let app = forge_proxy::build_router(state);
+async fn test_auth_missing_header_returns_401() {
+    let state = make_state_with_auth_token("secret-token-abc");
+    let app = build_router(state);
 
     let req = Request::builder()
-        .method(Method::POST)
+        .method("POST")
         .uri("/")
         .header("content-type", "application/json")
         .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#))
@@ -1656,15 +1582,11 @@ async fn test_auth_missing_token_returns_401() {
 
 #[tokio::test]
 async fn test_auth_wrong_token_returns_401() {
-    use axum::body::Body;
-    use http::{Method, Request, StatusCode};
-    use tower::ServiceExt;
-
-    let state = forge_proxy::test_helpers::make_state_with_auth("secret-token-abc");
-    let app = forge_proxy::build_router(state);
+    let state = make_state_with_auth_token("secret-token-abc");
+    let app = build_router(state);
 
     let req = Request::builder()
-        .method(Method::POST)
+        .method("POST")
         .uri("/")
         .header("content-type", "application/json")
         .header("Authorization", "Bearer wrong-token")
@@ -1677,15 +1599,11 @@ async fn test_auth_wrong_token_returns_401() {
 
 #[tokio::test]
 async fn test_auth_correct_token_passes_through() {
-    use axum::body::Body;
-    use http::{Method, Request, StatusCode};
-    use tower::ServiceExt;
-
-    let state = forge_proxy::test_helpers::make_state_with_auth("secret-token-abc");
-    let app = forge_proxy::build_router(state);
+    let state = make_state_with_auth_token("secret-token-abc");
+    let app = build_router(state);
 
     let req = Request::builder()
-        .method(Method::POST)
+        .method("POST")
         .uri("/")
         .header("content-type", "application/json")
         .header("Authorization", "Bearer secret-token-abc")
@@ -1697,204 +1615,82 @@ async fn test_auth_correct_token_passes_through() {
 }
 
 #[tokio::test]
-async fn test_auth_well_known_exempt() {
-    use axum::body::Body;
-    use http::{Method, Request, StatusCode};
-    use tower::ServiceExt;
-
-    let state = forge_proxy::test_helpers::make_state_with_auth("secret-token-abc");
-    let app = forge_proxy::build_router(state);
+async fn test_auth_well_known_exempt_from_auth() {
+    let state = make_state_with_auth_token("secret-token-abc");
+    let app = build_router(state);
 
     let req = Request::builder()
-        .method(Method::GET)
-        .uri("/.well-known/mcp.json")
+        .method("GET")
+        .uri("/.well-known/mcp-servers.json")
         .body(Body::empty())
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
-    // Should NOT return 401 — well-known is public
-    assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_ne!(resp.status(), StatusCode::UNAUTHORIZED, "well-known must be public");
 }
 ```
 
-- [ ] **Step 4: Run to verify they fail**
+Note: Check `ProxyAppState` field names in `lib.rs` before running — if they differ from above, adjust to match. The struct fields are all `pub`, so direct construction works in integration tests.
+
+- [ ] **Step 3: Run tests to verify they fail**
 
 ```bash
 cargo test -p forge-proxy test_auth -- --nocapture 2>&1 | head -30
 ```
 
-Expected: compile errors — `make_state_with_auth` and `AuthLayer` not defined.
+Expected: compile error about field names (if the helper is wrong) or test failures showing `401` where `200` was expected.
 
-- [ ] **Step 5: Create `crates/forge-proxy/src/auth.rs`**
+- [ ] **Step 4: Run tests to verify they pass**
 
-```rust
-use std::task::{Context, Poll};
-
-use axum::body::Body;
-use futures::future::BoxFuture;
-use http::{Request, Response, StatusCode};
-use subtle::ConstantTimeEq;
-use tower::{Layer, Service};
-
-#[derive(Clone)]
-pub struct AuthLayer {
-    token: Option<String>,
-}
-
-impl AuthLayer {
-    pub fn new(token: Option<String>) -> Self {
-        Self { token }
-    }
-}
-
-impl<S> Layer<S> for AuthLayer {
-    type Service = AuthMiddleware<S>;
-
-    fn layer(&self, inner: S) -> Self::Service {
-        AuthMiddleware {
-            inner,
-            token: self.token.clone(),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct AuthMiddleware<S> {
-    inner: S,
-    token: Option<String>,
-}
-
-impl<S> Service<Request<Body>> for AuthMiddleware<S>
-where
-    S: Service<Request<Body>, Response = Response<Body>> + Clone + Send + 'static,
-    S::Future: Send + 'static,
-{
-    type Response = Response<Body>;
-    type Error = S::Error;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, req: Request<Body>) -> Self::Future {
-        // /.well-known/ is always public.
-        if req.uri().path().starts_with("/.well-known/") {
-            let fut = self.inner.call(req);
-            return Box::pin(async move { fut.await });
-        }
-
-        let required_token = match &self.token {
-            None => {
-                // Auth disabled — pass through.
-                let fut = self.inner.call(req);
-                return Box::pin(async move { fut.await });
-            }
-            Some(t) => t.clone(),
-        };
-
-        // Extract Bearer token from Authorization header.
-        let provided = req
-            .headers()
-            .get(http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .map(|s| s.to_string());
-
-        let provided = match provided {
-            Some(p) => p,
-            None => {
-                return Box::pin(async move {
-                    Ok(Response::builder()
-                        .status(StatusCode::UNAUTHORIZED)
-                        .body(Body::from("Unauthorized"))
-                        .unwrap())
-                });
-            }
-        };
-
-        // Constant-time comparison to prevent timing attacks.
-        let matches = provided.as_bytes().ct_eq(required_token.as_bytes()).into();
-        if !matches {
-            return Box::pin(async move {
-                Ok(Response::builder()
-                    .status(StatusCode::UNAUTHORIZED)
-                    .body(Body::from("Unauthorized"))
-                    .unwrap())
-            });
-        }
-
-        let fut = self.inner.call(req);
-        Box::pin(async move { fut.await })
-    }
-}
-```
-
-- [ ] **Step 6: Wire `AuthLayer` in `forge-proxy/src/lib.rs`**
-
-In `lib.rs`, add `mod auth;` and `use auth::AuthLayer;`.
-
-In `build_router` (or wherever the router is constructed), add the auth layer:
-
-```rust
-pub fn build_router(state: ProxyAppState) -> axum::Router {
-    let auth_token = state.auth_token.clone();  // Option<String> resolved at startup
-    axum::Router::new()
-        .route("/", axum::routing::post(handle_request))
-        .route("/.well-known/mcp.json", axum::routing::get(handle_well_known))
-        .layer(AuthLayer::new(auth_token))
-        .with_state(state)
-}
-```
-
-`ProxyAppState` needs an `auth_token: Option<String>` field (the resolved value, not the `SecretRef`). Add it and populate it in the startup code that builds `ProxyAppState`.
-
-Add to `test_helpers`:
-
-```rust
-pub fn make_state_with_auth(token: &str) -> ProxyAppState {
-    let mut state = make_state_with_registry(ToolRegistry::new(Default::default()));
-    state.auth_token = Some(token.to_string());
-    state
-}
-```
-
-- [ ] **Step 7: Add startup warning in `forge start`**
-
-In `crates/forge-cli/src/commands/start.rs` (or wherever `forge start` is implemented), after resolving `ProxyConfig`:
-
-```rust
-let is_loopback = config.proxy.bind == "127.0.0.1" || config.proxy.bind == "::1";
-if !is_loopback && config.proxy.auth_token.is_none() {
-    eprintln!(
-        "warning: proxy is listening on a non-loopback address ({}) without auth_token set.\n\
-         Any process on the network can call your MCP tools.\n\
-         Set [proxy] auth_token in forge.toml to require authentication.",
-        config.proxy.bind
-    );
-}
-```
-
-- [ ] **Step 8: Run tests**
+After fixing any compile errors from Step 3:
 
 ```bash
 cargo test -p forge-proxy test_auth -- --nocapture
 ```
 
-Expected: all 4 auth tests PASS.
+Expected: all 4 tests PASS.
 
-- [ ] **Step 9: Run full suite**
+- [ ] **Step 5: Add startup warning in `forge start`**
+
+Locate the `forge start` implementation:
+
+```bash
+grep -rn "proxy.bind\|proxy\.bind\|forge start" crates/forge-cli/src/commands/ | head -20
+```
+
+In whichever file handles `forge start` (likely `start.rs`), find where `ProxyConfig` is read and add after it:
+
+```rust
+let is_loopback = matches!(
+    config.proxy.bind.as_str(),
+    "127.0.0.1" | "::1" | "localhost"
+);
+if !is_loopback && config.proxy.auth_token.is_none() {
+    tracing::warn!(
+        bind = %config.proxy.bind,
+        "proxy is listening on a non-loopback address without auth_token set; \
+         any process on the network can call your MCP tools — \
+         set [proxy] auth_token in forge.toml to require authentication"
+    );
+}
+```
+
+Use `tracing::warn!` (not `eprintln!`) to stay consistent with the structured logging pattern in the codebase.
+
+- [ ] **Step 6: Run full suite**
 
 ```bash
 cargo test --all && cargo clippy -- -D warnings
 ```
 
-- [ ] **Step 10: Commit**
+Expected: all green.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add Cargo.toml crates/forge-core/src/config/mod.rs crates/forge-proxy/src/auth.rs \
-        crates/forge-proxy/src/lib.rs crates/forge-proxy/tests/security_hardening.rs
-git commit -m "feat: add proxy Bearer token auth with constant-time comparison (Phase 4)"
+git add crates/forge-proxy/tests/security_hardening.rs
+git add crates/forge-cli/src/commands/start.rs
+git commit -m "feat: add auth middleware tests and startup warning for non-loopback proxy (Phase 4)"
 ```
 
 ---
@@ -1935,6 +1731,7 @@ git commit -m "feat: add proxy Bearer token auth with constant-time comparison (
 **Placeholder scan:** No placeholders. All code blocks are complete.
 
 **Type consistency check:**
+
 - `ToolInfo.name: String` — used consistently as `t.name.to_string()` from `Cow<'static, str>` (rmcp)
 - `ToolInfo.input_schema: serde_json::Value` — populated via `Value::Object((*t.input_schema).clone())` from `Arc<JsonObject>`
 - `MockMcpTransport.tools: Arc<Vec<ToolInfo>>` — `new()` wraps `Vec<String>` correctly
