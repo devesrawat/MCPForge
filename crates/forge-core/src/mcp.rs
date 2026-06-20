@@ -1,46 +1,78 @@
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use dashmap::DashMap;
+use http::{HeaderName, HeaderValue};
 use rmcp::{
     RoleClient, ServiceExt,
     model::{CallToolRequestParams, JsonObject},
     service::RunningService,
     transport::{ConfigureCommandExt, TokioChildProcess},
+    transport::streamable_http_client::{
+        StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+    },
 };
+use secrecy::ExposeSecret;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::Mutex;
-use tracing::warn;
+use tokio::sync::{Mutex, oneshot};
 
-/// Per-server tool list cache: server name → (cached_at, tool names).
-type PerServerCache = Arc<DashMap<String, (Instant, Vec<String>)>>;
+use crate::config::{
+    DefaultSecretResolver, ForgeConfig, SecretResolver, ServerConfig, Transport, resolve_server_env,
+};
+
+/// Per-server tool list cache: server name → (cached_at, tools).
+type PerServerCache = Arc<DashMap<String, (Instant, Vec<ToolInfo>)>>;
 
 /// Set of server names currently undergoing a background cache refresh.
-/// Presence in this map means a refresh task is already in-flight.
 type RefreshingSet = Arc<DashMap<String, ()>>;
 
-use crate::config::{ForgeConfig, ServerConfig, Transport, resolve_server_env};
+/// Tool metadata returned by upstream MCP servers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolInfo {
+    pub name: String,
+    pub description: Option<String>,
+    pub input_schema: Value,
+}
 
 #[async_trait]
 pub trait McpTransport: Send + Sync {
-    async fn list_tools(&self) -> Result<Vec<String>>;
+    async fn list_tools(&self) -> Result<Vec<ToolInfo>>;
     async fn call_tool(&self, name: &str, args: Value) -> Result<Value>;
 }
 
 #[derive(Debug, Clone)]
 pub struct MockMcpTransport {
-    pub tools: Arc<Vec<String>>,
+    pub tools: Arc<Vec<ToolInfo>>,
     pub call_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl MockMcpTransport {
-    pub fn new<T: Into<Vec<String>>>(tools: T) -> Self {
+    /// Convenience constructor: names only, empty input schemas.
+    pub fn new<T: Into<Vec<String>>>(names: T) -> Self {
+        let tools = names
+            .into()
+            .into_iter()
+            .map(|name| ToolInfo {
+                name,
+                description: None,
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            })
+            .collect();
         MockMcpTransport {
-            tools: Arc::new(tools.into()),
+            tools: Arc::new(tools),
+            call_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// Constructor with full schema information.
+    pub fn with_schemas(tools: Vec<ToolInfo>) -> Self {
+        MockMcpTransport {
+            tools: Arc::new(tools),
             call_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
@@ -48,7 +80,7 @@ impl MockMcpTransport {
 
 #[async_trait]
 impl McpTransport for MockMcpTransport {
-    async fn list_tools(&self) -> Result<Vec<String>> {
+    async fn list_tools(&self) -> Result<Vec<ToolInfo>> {
         self.call_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(self.tools.as_ref().clone())
@@ -134,13 +166,20 @@ impl RmcpChildTransport {
 
 #[async_trait]
 impl McpTransport for RmcpChildTransport {
-    async fn list_tools(&self) -> Result<Vec<String>> {
+    async fn list_tools(&self) -> Result<Vec<ToolInfo>> {
         let client = self.client.lock().await;
         let tools = client
             .list_all_tools()
             .await
             .map_err(|e| anyhow!("list_tools: {}", e))?;
-        Ok(tools.into_iter().map(|t| t.name.to_string()).collect())
+        Ok(tools
+            .into_iter()
+            .map(|t| ToolInfo {
+                name: t.name.to_string(),
+                description: t.description.map(|d| d.to_string()),
+                input_schema: Value::Object((*t.input_schema).clone()),
+            })
+            .collect())
     }
 
     async fn call_tool(&self, name: &str, args: Value) -> Result<Value> {
@@ -163,6 +202,228 @@ impl McpTransport for RmcpChildTransport {
     }
 }
 
+/// MCP over Streamable HTTP (current MCP spec, 2025-03-26+).
+pub struct HttpMcpTransport {
+    client: Mutex<RunningService<RoleClient, ()>>,
+}
+
+impl HttpMcpTransport {
+    pub async fn connect_streamable(
+        url: &str,
+        headers: HashMap<HeaderName, HeaderValue>,
+    ) -> Result<Self> {
+        let config = StreamableHttpClientTransportConfig::with_uri(url).custom_headers(headers);
+        let transport = StreamableHttpClientTransport::from_config(config);
+        let running = ()
+            .serve(transport)
+            .await
+            .map_err(|e| anyhow!("HTTP MCP handshake failed for '{}': {}", url, e))?;
+        Ok(Self {
+            client: Mutex::new(running),
+        })
+    }
+}
+
+#[async_trait]
+impl McpTransport for HttpMcpTransport {
+    async fn list_tools(&self) -> Result<Vec<ToolInfo>> {
+        let client = self.client.lock().await;
+        let tools = client
+            .list_all_tools()
+            .await
+            .map_err(|e| anyhow!("list_tools: {}", e))?;
+        Ok(tools
+            .into_iter()
+            .map(|t| ToolInfo {
+                name: t.name.to_string(),
+                description: t.description.map(|d| d.to_string()),
+                input_schema: Value::Object((*t.input_schema).clone()),
+            })
+            .collect())
+    }
+
+    async fn call_tool(&self, name: &str, args: Value) -> Result<Value> {
+        let client = self.client.lock().await;
+        let map: JsonObject = match args {
+            Value::Object(o) => o,
+            Value::Null => JsonObject::new(),
+            other => {
+                let mut m = JsonObject::new();
+                m.insert("value".to_string(), other);
+                m
+            }
+        };
+        let params = CallToolRequestParams::new(name.to_string()).with_arguments(map);
+        let result = client
+            .call_tool(params)
+            .await
+            .map_err(|e| anyhow!("call_tool: {}", e))?;
+        serde_json::to_value(&result).map_err(|e| anyhow!(e))
+    }
+}
+
+struct LegacySseInner {
+    messages_url: String,
+    http_client: reqwest::Client,
+    pending: Arc<DashMap<u64, oneshot::Sender<Result<serde_json::Value>>>>,
+    next_id: AtomicU64,
+}
+
+/// MCP over legacy SSE transport (MCP 2024-11-05).
+pub struct LegacySseMcpTransport {
+    inner: Arc<LegacySseInner>,
+}
+
+impl LegacySseMcpTransport {
+    pub async fn connect(
+        url: &str,
+        headers: HashMap<HeaderName, HeaderValue>,
+    ) -> Result<Self> {
+        use futures::StreamExt;
+        use sse_stream::SseStream;
+
+        let client = reqwest::Client::new();
+
+        let mut req = client.get(url);
+        for (k, v) in &headers {
+            req = req.header(k.clone(), v.clone());
+        }
+        req = req.header(reqwest::header::ACCEPT, "text/event-stream");
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| anyhow!("SSE connect failed: {}", e))?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("SSE server returned {}", resp.status()));
+        }
+
+        // Box::pin so the stream is heap-allocated and can be moved into
+        // tokio::spawn below. The session ID in the endpoint URL is bound to
+        // THIS connection — never reconnect after extracting the endpoint event.
+        let mut stream = Box::pin(SseStream::from_byte_stream(resp.bytes_stream()));
+
+        let mut messages_url = None;
+        while let Some(event) = stream.next().await {
+            let event = event.map_err(|e| anyhow!("SSE parse error: {}", e))?;
+            if event.event.as_deref() == Some("endpoint") {
+                let data = event.data.unwrap_or_default();
+                messages_url = Some(if data.starts_with("http") {
+                    data
+                } else {
+                    let base = url.trim_end_matches("/sse").trim_end_matches('/');
+                    format!("{}{}", base, data)
+                });
+                break;
+            }
+        }
+
+        let messages_url = messages_url
+            .ok_or_else(|| anyhow!("SSE server did not send an 'endpoint' event"))?;
+
+        let pending: Arc<DashMap<u64, oneshot::Sender<Result<serde_json::Value>>>> =
+            Arc::new(DashMap::new());
+        let pending_clone = pending.clone();
+
+        // Move the original stream (not a reconnect) into the background reader.
+        // All JSON-RPC responses arrive as `message` events on this same connection.
+        tokio::spawn(async move {
+            while let Some(Ok(event)) = stream.next().await {
+                if event.event.as_deref() == Some("message") {
+                    if let Some(ref data) = event.data {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            if let Some(id) = json["id"].as_u64() {
+                                if let Some((_, tx)) = pending_clone.remove(&id) {
+                                    let _ = tx.send(Ok(json));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            pending_clone.clear();
+        });
+
+        Ok(Self {
+            inner: Arc::new(LegacySseInner {
+                messages_url,
+                http_client: client,
+                pending,
+                next_id: AtomicU64::new(1),
+            }),
+        })
+    }
+
+    async fn send_request(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.inner.pending.insert(id, tx);
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+
+        let resp = self
+            .inner
+            .http_client
+            .post(&self.inner.messages_url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                self.inner.pending.remove(&id);
+                anyhow!("POST to messages endpoint failed: {}", e)
+            })?;
+
+        if !resp.status().is_success() {
+            self.inner.pending.remove(&id);
+            return Err(anyhow!("messages endpoint returned {}", resp.status()));
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+            .await
+            .map_err(|_| {
+                self.inner.pending.remove(&id);
+                anyhow!("timeout waiting for SSE response to request {}", id)
+            })?
+            .map_err(|_| anyhow!("SSE response channel closed unexpectedly"))?
+    }
+}
+
+#[async_trait]
+impl McpTransport for LegacySseMcpTransport {
+    async fn list_tools(&self) -> Result<Vec<ToolInfo>> {
+        let resp = self
+            .send_request("tools/list", serde_json::json!({}))
+            .await?;
+        let tools = resp["result"]["tools"]
+            .as_array()
+            .ok_or_else(|| anyhow!("SSE list_tools: missing tools array"))?;
+        Ok(tools
+            .iter()
+            .map(|t| ToolInfo {
+                name: t["name"].as_str().unwrap_or("").to_string(),
+                description: t["description"].as_str().map(|s| s.to_string()),
+                input_schema: t.get("inputSchema").cloned().unwrap_or_else(|| {
+                    serde_json::json!({"type": "object", "properties": {}})
+                }),
+            })
+            .collect())
+    }
+
+    async fn call_tool(&self, name: &str, args: Value) -> Result<Value> {
+        let params = serde_json::json!({ "name": name, "arguments": args });
+        let resp = self.send_request("tools/call", params).await?;
+        if let Some(err) = resp.get("error") {
+            return Err(anyhow!("MCP error: {}", err));
+        }
+        Ok(resp["result"].clone())
+    }
+}
+
 #[derive(Clone)]
 pub struct ToolRegistry {
     transports: Arc<HashMap<String, Arc<dyn McpTransport>>>,
@@ -174,7 +435,9 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new(transports: HashMap<String, Arc<dyn McpTransport>>) -> Self {
-        Self::with_options(transports, Duration::from_secs(300))
+        // 60s default: short enough that a restarted server's stale tool list
+        // expires quickly. Override with FORGE_TOOL_CACHE_TTL_SECS env var.
+        Self::with_options(transports, Duration::from_secs(60))
     }
 
     pub fn with_options(transports: HashMap<String, Arc<dyn McpTransport>>, ttl: Duration) -> Self {
@@ -217,15 +480,14 @@ impl ToolRegistry {
         self.cache.remove(server);
     }
 
-    pub async fn list_all_tools(&self) -> Result<Vec<String>> {
+    pub async fn list_all_tools(&self) -> Result<Vec<ToolInfo>> {
         let mut tools = Vec::new();
         for (server, transport) in self.transports.iter() {
             let server_tools = self.cached_list_tools(server, transport.as_ref()).await?;
-            tools.extend(
-                server_tools
-                    .into_iter()
-                    .map(|tool| crate::protocol::namespace_tool(server, &tool)),
-            );
+            tools.extend(server_tools.into_iter().map(|mut t| {
+                t.name = crate::protocol::namespace_tool(server, &t.name);
+                t
+            }));
         }
         Ok(tools)
     }
@@ -234,7 +496,7 @@ impl ToolRegistry {
         &self,
         server: &str,
         transport: &dyn McpTransport,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<ToolInfo>> {
         if let Some(entry) = self.cache.get(server) {
             if entry.0.elapsed() < self.ttl {
                 // Fresh — return directly.
@@ -276,7 +538,7 @@ impl ToolRegistry {
         Ok(tools)
     }
 
-    pub async fn list_tools(&self, server: &str) -> Result<Vec<String>> {
+    pub async fn list_tools(&self, server: &str) -> Result<Vec<ToolInfo>> {
         let transport = self
             .transports
             .get(server)
@@ -297,12 +559,40 @@ impl ToolRegistry {
     }
 }
 
-/// Connect all configured stdio servers via rmcp.
+async fn build_auth_headers(
+    server_name: &str,
+    config: &ServerConfig,
+) -> Result<HashMap<HeaderName, HeaderValue>> {
+    let resolver = DefaultSecretResolver;
+    let mut map = HashMap::new();
+    for (header_name, secret_ref) in &config.secret {
+        let value = resolver
+            .resolve(server_name, secret_ref)
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "failed to resolve secret for header '{}': {}",
+                    header_name,
+                    e
+                )
+            })?;
+        let name = HeaderName::from_bytes(header_name.as_bytes()).map_err(|e| {
+            anyhow!("invalid header name '{}': {}", header_name, e)
+        })?;
+        let val = HeaderValue::from_str(value.expose_secret()).map_err(|e| {
+            anyhow!("invalid header value for '{}': {}", header_name, e)
+        })?;
+        map.insert(name, val);
+    }
+    Ok(map)
+}
+
+/// Connect all configured MCP servers (stdio, HTTP, or legacy SSE).
 pub async fn build_tool_registry(config: &ForgeConfig) -> Result<ToolRegistry> {
     let ttl_secs = std::env::var("FORGE_TOOL_CACHE_TTL_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(300);
+        .unwrap_or(60);
     let ttl = Duration::from_secs(ttl_secs);
 
     let mut map: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
@@ -316,18 +606,32 @@ pub async fn build_tool_registry(config: &ForgeConfig) -> Result<ToolRegistry> {
                 pids.insert(name.clone(), pid);
             }
             Transport::Http => {
-                warn!(
-                    "server '{}': http transport skipped (not implemented)",
-                    name
-                );
+                let url = server_cfg.url.as_deref().ok_or_else(|| {
+                    anyhow!("server '{}': url required for http transport", name)
+                })?;
+                let headers = build_auth_headers(name, server_cfg).await?;
+                let transport = HttpMcpTransport::connect_streamable(url, headers)
+                    .await
+                    .map_err(|e| anyhow!("server '{}': {}", name, e))?;
+                map.insert(name.clone(), Arc::new(transport));
+                pids.insert(name.clone(), None);
+            }
+            Transport::Sse => {
+                let url = server_cfg.url.as_deref().ok_or_else(|| {
+                    anyhow!("server '{}': url required for sse transport", name)
+                })?;
+                let headers = build_auth_headers(name, server_cfg).await?;
+                let transport = LegacySseMcpTransport::connect(url, headers)
+                    .await
+                    .map_err(|e| anyhow!("server '{}': {}", name, e))?;
+                map.insert(name.clone(), Arc::new(transport));
+                pids.insert(name.clone(), None);
             }
         }
     }
 
     if map.is_empty() {
-        return Err(anyhow!(
-            "no stdio MCP servers configured (http transport is not supported yet)"
-        ));
+        return Err(anyhow!("no MCP servers could be connected"));
     }
 
     Ok(ToolRegistry::from_build(map, pids, ttl))
@@ -339,6 +643,100 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_tool_registry_default_ttl_is_60s() {
+        let transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
+        let registry = ToolRegistry::new(transports);
+        assert_eq!(registry.ttl, Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn test_mock_transport_new_returns_empty_schemas() {
+        let transport = MockMcpTransport::new(vec!["echo".to_string()]);
+        let tools = transport.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+        assert!(tools[0].description.is_none());
+        assert_eq!(
+            tools[0].input_schema,
+            serde_json::json!({"type": "object", "properties": {}})
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mock_transport_with_schemas_returns_provided_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "message": { "type": "string" } },
+            "required": ["message"]
+        });
+        let tools = vec![ToolInfo {
+            name: "echo".to_string(),
+            description: Some("Echo a message".to_string()),
+            input_schema: schema.clone(),
+        }];
+        let transport = MockMcpTransport::with_schemas(tools);
+        let result = transport.list_tools().await.unwrap();
+        assert_eq!(result[0].description.as_deref(), Some("Echo a message"));
+        assert_eq!(result[0].input_schema, schema);
+    }
+
+    #[tokio::test]
+    async fn test_tool_registry_list_all_tools_returns_full_tool_info() {
+        let schema = serde_json::json!({"type": "object", "properties": {}});
+        let tools = vec![ToolInfo {
+            name: "build".to_string(),
+            description: Some("Build the project".to_string()),
+            input_schema: schema.clone(),
+        }];
+        let transport = MockMcpTransport::with_schemas(tools);
+        let mut transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
+        transports.insert("ci".to_string(), Arc::new(transport));
+        let registry = ToolRegistry::new(transports);
+
+        let tools = registry.list_all_tools().await.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "ci__build");
+        assert_eq!(tools[0].description.as_deref(), Some("Build the project"));
+    }
+
+    #[tokio::test]
+    async fn test_http_mcp_transport_connect_streamable_fails_on_invalid_url() {
+        let headers = HashMap::new();
+        let result =
+            HttpMcpTransport::connect_streamable("http://127.0.0.1:19999/nonexistent", headers)
+                .await;
+        assert!(
+            result.is_err(),
+            "connecting to non-existent server should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_legacy_sse_transport_connect_fails_on_invalid_url() {
+        let headers = HashMap::new();
+        let result =
+            LegacySseMcpTransport::connect("http://127.0.0.1:19998/sse", headers).await;
+        assert!(
+            result.is_err(),
+            "connection to non-existent SSE server should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_tool_registry_http_without_url_errors() {
+        let cfg = r#"
+[server.broken-http]
+transport = "http"
+url = ""
+"#;
+        let result = ForgeConfig::parse_str(cfg);
+        assert!(
+            result.is_err(),
+            "http server with empty url should fail config validation"
+        );
+    }
 
     #[tokio::test]
     async fn list_all_tools_namespaces_tools() {
@@ -353,8 +751,9 @@ mod tests {
 
         let registry = ToolRegistry::new(transports);
         let tools = registry.list_all_tools().await.unwrap();
-
-        assert_eq!(tools, vec!["local__build", "local__test"]);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"local__build"));
+        assert!(names.contains(&"local__test"));
     }
 
     #[tokio::test]
@@ -388,7 +787,8 @@ mod tests {
 
         // Prime the cache (1st transport call).
         let first = registry.list_tools("local").await.unwrap();
-        assert_eq!(first, vec!["build"]);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].name, "build");
         assert_eq!(
             call_count.load(std::sync::atomic::Ordering::SeqCst),
             1,
@@ -401,7 +801,8 @@ mod tests {
         // Second call on a stale cache should still return the stale data without
         // blocking (stale-while-revalidate). The background refresh runs concurrently.
         let second = registry.list_tools("local").await.unwrap();
-        assert_eq!(second, vec!["build"]);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].name, "build");
 
         // Poll for the background refresh to complete (bounded timeout avoids
         // flakiness on slow CI while not blocking indefinitely).
