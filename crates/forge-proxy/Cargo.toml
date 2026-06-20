@@ -22,6 +22,9 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 uuid = { workspace = true }
 futures = { workspace = true }
+subtle = { workspace = true }
+secrecy = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "net"] }
+rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
