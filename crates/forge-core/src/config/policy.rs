@@ -1,6 +1,6 @@
 //! Tool allow/deny globs (RBAC-style policy at config time).
 
-use crate::config::validation::validate_server_name;
+use crate::config::validation::{validate_server_name, validate_server_transport};
 use crate::config::{ServerConfig, ValidationError};
 use globset::{Glob, GlobMatcher};
 
@@ -60,6 +60,7 @@ pub fn validate_all_servers(
             .map_err(|e| ValidationError(format!("server '{}': {}", name, e)))?;
         RbacPolicy::from_server_config(cfg)
             .map_err(|e| ValidationError(format!("server '{}': {}", name, e)))?;
+        validate_server_transport(name, cfg).map_err(|e| ValidationError(e.0))?;
     }
     Ok(())
 }

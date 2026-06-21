@@ -12,9 +12,15 @@ path = "main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+rmcp = { workspace = true, features = [
+    "server",
+    "transport-streamable-http-server",
+] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-[dependencies.tokio]
-workspace = true
-features = ["io-std", "macros", "rt"]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "sync"] }
+dashmap = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+futures = { workspace = true }

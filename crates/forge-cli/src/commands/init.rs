@@ -56,8 +56,9 @@ impl Init {
             cfg.server.insert(
                 name.trim().to_owned(),
                 ServerConfig {
-                    cmd,
+                    cmd: Some(cmd),
                     transport: Transport::Stdio,
+                    url: None,
                     secret: secret_map,
                     allowed_tools: Vec::new(),
                     deny_tools: Vec::new(),

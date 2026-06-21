@@ -42,17 +42,21 @@ Run `cargo fmt --all` to auto-format before committing.
 ## Making Changes
 
 1. Fork the repo and create a feature branch:
+
    ```bash
    git checkout -b feat/your-feature
    ```
+
 2. Write tests before or alongside your changes (`cargo test --all` must stay green).
 3. Keep `fmt` and `clippy` clean.
 4. Commit using [conventional commits](https://www.conventionalcommits.org/):
+
    ```
    feat: add per-server timeout config
    fix: correct rate limit window reset
    docs: update forge.toml.example
    ```
+
 5. Push your branch and open a pull request against `development`.
 
 ## Pull Request Guidelines

@@ -6,11 +6,13 @@ mod commands;
 mod telemetry;
 use commands::{
     Add, Audit, Check, Init, Logs, Ls, Remove, Report, Restart, Secret, Start, Status, Stop,
+    Watch,
 };
 
 #[derive(Debug, Parser)]
 #[command(name = "forge")]
 #[command(about = "mcp-forge CLI", long_about = None)]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -31,6 +33,7 @@ enum Commands {
     Restart(Restart),
     Status(Status),
     Logs(Logs),
+    Watch(Watch),
 }
 
 fn main() -> Result<()> {
@@ -60,5 +63,6 @@ fn main() -> Result<()> {
         Commands::Restart(cmd) => cmd.run(),
         Commands::Status(cmd) => cmd.run(),
         Commands::Logs(cmd) => cmd.run(),
+        Commands::Watch(cmd) => cmd.run(),
     }
 }

@@ -26,6 +26,13 @@ pub enum SecretAction {
 pub struct Set {
     #[arg(help = "Keychain username / logical secret name")]
     pub name: String,
+
+    #[arg(
+        long,
+        env = "FORGE_SECRET_VALUE",
+        help = "Secret value (less secure than interactive entry; suitable for CI)"
+    )]
+    pub value: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -62,8 +69,34 @@ impl SecretAction {
 
 impl Set {
     pub fn run(&self) -> Result<()> {
-        let pw = rpassword::prompt_password("Enter secret to store (not echoed): ")
-            .context("read password")?;
+        let pw = if let Some(ref v) = self.value {
+            // --value flag or FORGE_SECRET_VALUE env var supplied — use directly.
+            // Warn about ps-aux / shell-history exposure when the value comes from
+            // a CLI argument (the env-var path is safer but we warn anyway so the
+            // message is visible regardless of how the value arrived).
+            eprintln!(
+                "warning: --value/FORGE_SECRET_VALUE can expose the secret in process listings \
+                 (ps aux) or shell history; prefer interactive entry when possible"
+            );
+            v.clone()
+        } else {
+            // Try interactive tty read first; fall back to stdin for CI contexts.
+            match rpassword::prompt_password("Enter secret to store (not echoed): ") {
+                Ok(pw) => pw,
+                Err(_) => {
+                    // tty not available (e.g. "Device not configured" in CI);
+                    // read a single line from stdin rather than the whole stream.
+                    let mut buf = String::new();
+                    BufReader::new(std::io::stdin())
+                        .read_line(&mut buf)
+                        .context("read secret from stdin")?;
+                    buf.trim_end_matches(['\n', '\r']).to_owned()
+                }
+            }
+        };
+        if pw.is_empty() {
+            anyhow::bail!("secret value must not be empty");
+        }
         let entry = Entry::new("mcp-forge", &self.name)
             .map_err(|e| anyhow::anyhow!("invalid keychain entry: {}", e))?;
         entry
@@ -119,7 +152,18 @@ impl Check {
             .enable_all()
             .build()
             .context("tokio runtime")?;
-        let v = rt.block_on(async { resolver.resolve("check", &sr).await })?;
+        // Pass an empty service string; then remap the error so it doesn't
+        // leak the CLI subcommand name ("check") as if it were a server name.
+        let v = rt
+            .block_on(async { resolver.resolve("", &sr).await })
+            .map_err(|e| {
+                // Rewrite "(needed by server '')" suffix produced by the resolver.
+                let msg = e.to_string();
+                let clean = msg
+                    .trim_end_matches(" (needed by server '')")
+                    .replace("not set (needed by server '')", "is not set");
+                anyhow::anyhow!("{}", clean)
+            })?;
         println!(
             "OK: ref resolves (length {} chars)",
             v.expose_secret().len()

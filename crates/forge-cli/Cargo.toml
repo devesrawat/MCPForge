@@ -43,10 +43,16 @@ toml = { workspace = true }
 secrecy = { workspace = true }
 globset = { workspace = true }
 which = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+csv = { workspace = true }
 opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "trace"], default-features = false, optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

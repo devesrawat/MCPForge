@@ -8,7 +8,7 @@ use std::time::Duration;
 use forge_core::supervisor::logs_dir_path;
 
 #[derive(Debug, Args)]
-#[command(about = "Show or follow logs for an MCP server")]
+#[command(about = "Show or follow logs for an MCP server (requires `forge start --daemon`)")]
 pub struct Logs {
     #[arg(help = "Server name")]
     pub server: String,
@@ -25,7 +25,10 @@ impl Logs {
         let log_path = logs_dir_path()?.join(format!("{}.log", self.server));
         if !log_path.exists() {
             return Err(anyhow::anyhow!(
-                "log file not found: {}",
+                "no log file found for server '{}'.\n\
+                 Logs are only written when the proxy runs in daemon mode (forge start --daemon).\n\
+                 Log path checked: {}",
+                self.server,
                 log_path.display()
             ));
         }

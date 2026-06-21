@@ -15,7 +15,7 @@ use axum::{
     extract::{Query, State},
     http::StatusCode,
     response::{
-        IntoResponse,
+        IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
 };
@@ -31,6 +31,10 @@ use crate::{JsonRpcRequest, ProxyAppState, dispatch_request};
 /// Bounded capacity for each SSE session channel.
 /// Prevents unbounded memory growth for slow or disconnected clients.
 const SSE_CHANNEL_CAPACITY: usize = 64;
+
+/// Maximum number of concurrent SSE sessions.
+/// New connections are rejected with 503 once this cap is reached.
+const MAX_SSE_SESSIONS: usize = 256;
 
 /// Per-session SSE channel map: session_id → bounded sender for SSE events.
 pub type SessionStore = Arc<DashMap<String, Sender<String>>>;
@@ -59,9 +63,16 @@ impl Drop for SessionGuard {
 ///
 /// The handler immediately sends an `endpoint` event so the client knows
 /// where to POST requests, then streams `message` events for each response.
-pub async fn handle_sse_connect(
-    State(state): State<ProxyAppState>,
-) -> Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>> {
+/// Returns 503 when the concurrent session cap (`MAX_SSE_SESSIONS`) is reached.
+pub async fn handle_sse_connect(State(state): State<ProxyAppState>) -> Response {
+    if state.sessions.len() >= MAX_SSE_SESSIONS {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SSE session limit reached",
+        )
+            .into_response();
+    }
+
     let session_id = Uuid::new_v4().to_string();
     let (tx, rx): (Sender<String>, Receiver<String>) = channel(SSE_CHANNEL_CAPACITY);
     state.sessions.insert(session_id.clone(), tx);
@@ -94,7 +105,7 @@ pub async fn handle_sse_connect(
     let combined = stream::once(async { endpoint_event }).chain(message_stream);
     let sse_stream = combined.map(Ok::<_, std::convert::Infallible>);
 
-    Sse::new(sse_stream).keep_alive(KeepAlive::default())
+    Sse::new(sse_stream).keep_alive(KeepAlive::default()).into_response()
 }
 
 /// `POST /messages?session_id=<id>` — receive a JSON-RPC request from
@@ -102,10 +113,14 @@ pub async fn handle_sse_connect(
 ///
 /// Returns 202 Accepted immediately; the actual JSON-RPC response travels
 /// through the SSE stream opened by `GET /sse`.
+///
+/// If the body has no `id` key it is a JSON-RPC *notification*: the server
+/// acknowledges it with 202 Accepted without sending anything over the SSE
+/// stream (notifications do not receive responses per JSON-RPC 2.0 §4).
 pub async fn handle_sse_message(
     State(state): State<ProxyAppState>,
     Query(q): Query<SessionQuery>,
-    axum::Json(request): axum::Json<JsonRpcRequest>,
+    axum::Json(body): axum::Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let Some(session_id) = q.session_id else {
         return (
@@ -115,12 +130,27 @@ pub async fn handle_sse_message(
             .into_response();
     };
 
+    // JSON-RPC 2.0 §4: a notification has no `id` member at all.
+    // Acknowledge it with 202 without forwarding anything over the SSE stream.
+    let is_notification = body
+        .as_object()
+        .map(|o| !o.contains_key("id"))
+        .unwrap_or(false);
+    if is_notification {
+        return StatusCode::ACCEPTED.into_response();
+    }
+
     let Some(tx) = state.sessions.get(&session_id).map(|e| e.clone()) else {
         return (
             StatusCode::NOT_FOUND,
             format!("unknown session_id '{}'", session_id),
         )
             .into_response();
+    };
+
+    let request: JsonRpcRequest = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
     let id = request.id.clone();

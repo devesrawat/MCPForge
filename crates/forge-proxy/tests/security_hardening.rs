@@ -176,6 +176,7 @@ cmd = "true"
         let resp = post_rpc(
             state,
             json!({
+                "jsonrpc": "2.0",
                 "method": "tools/call",
                 "params": {
                     "name": "local__search",
@@ -216,6 +217,7 @@ cmd = "true"
         let resp = post_rpc(
             state,
             json!({
+                "jsonrpc": "2.0",
                 "method": "tools/call",
                 "params": {
                     "name": "local__search",
@@ -252,6 +254,7 @@ deny_tools = ["admin_*"]
         let resp = post_rpc(
             state,
             json!({
+                "jsonrpc": "2.0",
                 "method": "tools/call",
                 "params": { "name": "local__admin_reset", "arguments": {} },
                 "id": 3
@@ -302,6 +305,7 @@ max_calls_per_min = 1
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
+                        "jsonrpc": "2.0",
                         "method": "tools/call",
                         "params": { "name": "local__ping", "arguments": {} },
                         "id": 1
@@ -364,6 +368,7 @@ deny_tools = ["admin_*"]
         let resp = post_rpc(
             state,
             json!({
+                "jsonrpc": "2.0",
                 "method": "tools/call",
                 "params": { "name": "local__safe_query", "arguments": {} },
                 "id": 4
@@ -408,5 +413,207 @@ cmd = "true"
             ct.starts_with("text/event-stream"),
             "expected text/event-stream content-type, got: {ct}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_proxy_e2e_tools_list_returns_namespaced_tools() {
+        use axum::http::Method;
+        use forge_core::mcp::MockMcpTransport;
+
+        let transport = MockMcpTransport::new(vec!["echo".to_string(), "ping".to_string()]);
+        let mut transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
+        transports.insert("test_server".to_string(), Arc::new(transport));
+        let registry = ToolRegistry::new(transports);
+
+        let state = forge_proxy::test_helpers::make_state_with_registry(registry);
+        let app = build_router(state);
+
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+        });
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let tools = json["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"test_server__echo"));
+        assert!(names.contains(&"test_server__ping"));
+    }
+
+    #[tokio::test]
+    async fn test_proxy_e2e_rate_limit_returns_32000() {
+        use axum::http::Method;
+        use forge_core::mcp::MockMcpTransport;
+
+        let transport = MockMcpTransport::new(vec!["echo".to_string()]);
+        let mut transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
+        transports.insert("rate_srv".to_string(), Arc::new(transport));
+        let registry = ToolRegistry::new(transports);
+
+        let state = forge_proxy::test_helpers::make_state_with_registry_and_rate_limit(
+            registry, "rate_srv", 1,
+        );
+        let app = build_router(state);
+
+        let call_body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "rate_srv__echo", "arguments": {} }
+        });
+
+        let req1 = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(call_body.to_string()))
+            .unwrap();
+        let resp1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        let req2 = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(call_body.to_string()))
+            .unwrap();
+        let resp2 = app.oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let bytes = to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"]["code"], -32_000);
+    }
+
+    #[tokio::test]
+    async fn test_proxy_tools_list_returns_real_schema() {
+        use axum::http::Method;
+        use forge_core::mcp::{MockMcpTransport, ToolInfo};
+
+        let schema = json!({
+            "type": "object",
+            "properties": { "title": { "type": "string" } },
+            "required": ["title"]
+        });
+        let tools = vec![ToolInfo {
+            name: "create_issue".to_string(),
+            description: Some("Create a GitHub issue".to_string()),
+            input_schema: schema.clone(),
+        }];
+        let transport = MockMcpTransport::with_schemas(tools);
+        let mut transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
+        transports.insert("github".to_string(), Arc::new(transport));
+        let registry = ToolRegistry::new(transports);
+
+        let state = forge_proxy::test_helpers::make_state_with_registry(registry);
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let tool = &json["result"]["tools"][0];
+        assert_eq!(tool["name"], "github__create_issue");
+        assert_eq!(tool["description"], "Create a GitHub issue");
+        assert_eq!(tool["inputSchema"]["properties"]["title"]["type"], "string");
+    }
+
+    #[tokio::test]
+    async fn test_auth_missing_token_returns_401() {
+        use axum::http::Method;
+
+        let state = forge_proxy::test_helpers::make_state_with_auth("secret-token-abc");
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_auth_wrong_token_returns_401() {
+        use axum::http::Method;
+
+        let state = forge_proxy::test_helpers::make_state_with_auth("secret-token-abc");
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header("content-type", "application/json")
+            .header("Authorization", "Bearer wrong-token")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_auth_correct_token_passes_through() {
+        use axum::http::Method;
+
+        let state = forge_proxy::test_helpers::make_state_with_auth("secret-token-abc");
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header("content-type", "application/json")
+            .header("Authorization", "Bearer secret-token-abc")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_auth_well_known_exempt() {
+        use axum::http::Method;
+
+        let state = forge_proxy::test_helpers::make_state_with_auth("secret-token-abc");
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/.well-known/mcp-servers.json")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

@@ -24,7 +24,11 @@ globset = { workspace = true }
 dashmap = { workspace = true }
 tracing = { workspace = true }
 regex = { workspace = true }
+futures = { workspace = true }
 rmcp = { workspace = true }
+reqwest = { workspace = true }
+http = "1"
+sse-stream = { version = "0.2" }
 
 [dev-dependencies]
 toml = { workspace = true }

@@ -3,14 +3,25 @@ use async_trait::async_trait;
 use keyring::Entry;
 use secrecy::SecretString;
 use serde::de::{Deserialize, Deserializer};
+use serde::{Serialize, Serializer};
 
-use serde::Serialize;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretRef {
     Env(String),
     Keychain(String),
     Literal(String),
+}
+
+impl Serialize for SecretRef {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let s = match self {
+            SecretRef::Env(name) => format!("env:{name}"),
+            SecretRef::Keychain(name) => format!("keychain:{name}"),
+            // Never write the plaintext literal to disk.
+            SecretRef::Literal(_) => "literal:[redacted-on-save]".to_owned(),
+        };
+        serializer.serialize_str(&s)
+    }
 }
 
 impl<'de> Deserialize<'de> for SecretRef {

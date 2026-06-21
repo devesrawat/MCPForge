@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::config::{ServerConfig, Transport};
+
 #[derive(Debug)]
 pub struct ValidationError(pub String);
 
@@ -33,6 +35,35 @@ pub fn validate_server_name(name: &str) -> Result<(), ValidationError> {
             "server name '{}' contains invalid characters (allowed: a-z A-Z 0-9 _ -)",
             name
         )));
+    }
+    Ok(())
+}
+
+pub fn validate_server_transport(name: &str, server: &ServerConfig) -> Result<(), ValidationError> {
+    match server.transport {
+        Transport::Stdio => {
+            if server.cmd.as_deref().unwrap_or("").trim().is_empty() {
+                return Err(ValidationError(format!(
+                    "server '{}': transport=stdio requires cmd to be set",
+                    name
+                )));
+            }
+        }
+        Transport::Http | Transport::Sse => {
+            let url = server.url.as_deref().unwrap_or("").trim();
+            if url.is_empty() {
+                return Err(ValidationError(format!(
+                    "server '{}': transport={} requires url to be set",
+                    name, server.transport
+                )));
+            }
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(ValidationError(format!(
+                    "server '{}': url must start with http:// or https://, got: {}",
+                    name, url
+                )));
+            }
+        }
     }
     Ok(())
 }

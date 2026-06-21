@@ -6,6 +6,10 @@ rust-version = "1.85"
 
 [features]
 default = []
+# Expose test helpers (test_helpers module) for use in integration tests or
+# downstream crates that need forge-proxy test utilities without being in a
+# #[cfg(test)] context.  Always enabled automatically when running `cargo test`.
+test-helpers = []
 
 [dependencies]
 axum = { workspace = true }
@@ -22,6 +26,12 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 uuid = { workspace = true }
 futures = { workspace = true }
+subtle = { workspace = true }
+secrecy = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "net", "process"] }
+rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
+dashmap = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+futures = { workspace = true }

@@ -44,8 +44,9 @@ async fn start_all_creates_state_file_for_true_server() {
         server: vec![(
             "test".to_owned(),
             ServerConfig {
-                cmd: "true".to_owned(),
+                cmd: Some("true".to_owned()),
                 transport: Transport::Stdio,
+                url: None,
                 secret: HashMap::new(),
                 allowed_tools: Vec::new(),
                 deny_tools: Vec::new(),
