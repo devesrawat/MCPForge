@@ -130,9 +130,14 @@ mod tests {
 
     #[test]
     fn zero_pid_is_not_alive() {
-        // PID 0 is not a real process; kill -0 0 signals the whole process group
-        // which may or may not succeed, but PID 0 is never a forge process.
-        // We just verify is_pid_alive(u32::MAX) returns false (unlikely to exist).
+        #[cfg(unix)]
+        assert!(!is_pid_alive(0), "PID 0 should not be alive");
+    }
+
+    #[test]
+    fn out_of_range_pid_is_not_alive() {
+        // u32::MAX cannot be a valid Unix PID (exceeds i32::MAX); libc::kill rejects it.
+        #[cfg(unix)]
         assert!(!is_pid_alive(u32::MAX), "PID u32::MAX should not be alive");
     }
 }

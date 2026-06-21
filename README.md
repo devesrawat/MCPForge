@@ -18,8 +18,17 @@ It focuses on practical operations: process supervision, tool namespacing, polic
 
 ### Homebrew
 
+Add the tap once, then install and upgrade like any homebrew package:
+
 ```bash
-brew install devesrawat/mcp-forge/mcp-forge
+brew tap devesrawat/mcp-forge
+brew install mcp-forge
+```
+
+Upgrade later with:
+
+```bash
+brew upgrade mcp-forge
 ```
 
 ### Shell installer
