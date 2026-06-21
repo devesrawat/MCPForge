@@ -52,12 +52,11 @@ fn is_pid_alive(_pid: u32) -> bool {
 /// If the state says "running" but the stored PID is no longer alive, the
 /// server has crashed without forge updating state; we report "stopped" instead.
 fn effective_status(info: &ServerState) -> &str {
-    if info.status == "running" {
-        if let Some(pid) = info.pid {
-            if !is_pid_alive(pid) {
-                return "stopped";
-            }
-        }
+    if info.status == "running"
+        && let Some(pid) = info.pid
+        && !is_pid_alive(pid)
+    {
+        return "stopped";
     }
     &info.status
 }
@@ -114,8 +113,7 @@ impl Status {
         // Determine which servers to show.
         // `is_global_fallback` is set when the local config doesn't exist — we
         // display everything from state.json and add a note in table mode.
-        let (filtered_servers, is_global_fallback) =
-            self.filter_servers(state.servers)?;
+        let (filtered_servers, is_global_fallback) = self.filter_servers(state.servers)?;
 
         if self.json {
             // Rebuild the state with only the filtered servers so JSON output

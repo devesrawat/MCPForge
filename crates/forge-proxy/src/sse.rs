@@ -66,11 +66,7 @@ impl Drop for SessionGuard {
 /// Returns 503 when the concurrent session cap (`MAX_SSE_SESSIONS`) is reached.
 pub async fn handle_sse_connect(State(state): State<ProxyAppState>) -> Response {
     if state.sessions.len() >= MAX_SSE_SESSIONS {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "SSE session limit reached",
-        )
-            .into_response();
+        return (StatusCode::SERVICE_UNAVAILABLE, "SSE session limit reached").into_response();
     }
 
     let session_id = Uuid::new_v4().to_string();
@@ -105,7 +101,9 @@ pub async fn handle_sse_connect(State(state): State<ProxyAppState>) -> Response 
     let combined = stream::once(async { endpoint_event }).chain(message_stream);
     let sse_stream = combined.map(Ok::<_, std::convert::Infallible>);
 
-    Sse::new(sse_stream).keep_alive(KeepAlive::default()).into_response()
+    Sse::new(sse_stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 /// `POST /messages?session_id=<id>` — receive a JSON-RPC request from

@@ -345,16 +345,13 @@ impl LegacySseMcpTransport {
         // All JSON-RPC responses arrive as `message` events on this same connection.
         tokio::spawn(async move {
             while let Some(Ok(event)) = stream.next().await {
-                if event.event.as_deref() == Some("message") {
-                    if let Some(ref data) = event.data {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                            if let Some(id) = json["id"].as_u64() {
-                                if let Some((_, tx)) = pending_clone.remove(&id) {
-                                    let _ = tx.send(Ok(json));
-                                }
-                            }
-                        }
-                    }
+                if event.event.as_deref() == Some("message")
+                    && let Some(ref data) = event.data
+                    && let Ok(json) = serde_json::from_str::<serde_json::Value>(data)
+                    && let Some(id) = json["id"].as_u64()
+                    && let Some((_, tx)) = pending_clone.remove(&id)
+                {
+                    let _ = tx.send(Ok(json));
                 }
             }
             // SSE stream ended — wake every waiting caller with an error so they
@@ -547,27 +544,27 @@ impl ToolRegistry {
             let stale = entry.1.clone();
             drop(entry); // release the DashMap read guard before spawning
             // Only one refresh per server at a time — insert into the set wins the race.
-            if self.refreshing.insert(server.to_string(), ()).is_none() {
-                if let Some(arc_transport) = self.transports.get(server).cloned() {
-                    let cache = self.cache.clone();
-                    let refreshing = self.refreshing.clone();
-                    let server_owned = server.to_string();
-                    tokio::spawn(async move {
-                        match arc_transport.list_tools().await {
-                            Ok(tools) => {
-                                cache.insert(server_owned.clone(), (Instant::now(), tools));
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    server = %server_owned,
-                                    "background cache refresh failed: {}",
-                                    e
-                                );
-                            }
+            if self.refreshing.insert(server.to_string(), ()).is_none()
+                && let Some(arc_transport) = self.transports.get(server).cloned()
+            {
+                let cache = self.cache.clone();
+                let refreshing = self.refreshing.clone();
+                let server_owned = server.to_string();
+                tokio::spawn(async move {
+                    match arc_transport.list_tools().await {
+                        Ok(tools) => {
+                            cache.insert(server_owned.clone(), (Instant::now(), tools));
                         }
-                        refreshing.remove(&server_owned);
-                    });
-                }
+                        Err(e) => {
+                            tracing::warn!(
+                                server = %server_owned,
+                                "background cache refresh failed: {}",
+                                e
+                            );
+                        }
+                    }
+                    refreshing.remove(&server_owned);
+                });
             }
             return Ok(stale);
         }
@@ -1011,7 +1008,9 @@ url = ""
     #[async_trait::async_trait]
     impl McpTransport for AlwaysErrTransport {
         async fn list_tools(&self) -> Result<Vec<ToolInfo>> {
-            Err(anyhow!("SSE list_tools error: {{\"code\":-32601,\"message\":\"Method not found\"}}"))
+            Err(anyhow!(
+                "SSE list_tools error: {{\"code\":-32601,\"message\":\"Method not found\"}}"
+            ))
         }
         async fn call_tool(&self, _name: &str, _args: Value) -> Result<Value> {
             Err(anyhow!("not implemented"))
@@ -1027,6 +1026,9 @@ url = ""
         let result = registry.list_tools("bad").await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("SSE list_tools error"), "expected error message, got: {msg}");
+        assert!(
+            msg.contains("SSE list_tools error"),
+            "expected error message, got: {msg}"
+        );
     }
 }

@@ -317,7 +317,7 @@ mod auth_edge {
             None,
         )
         .unwrap();
-        state.auth_token = Some(token.to_string().into());
+        state.auth_token = Some(token.to_string());
         build_router(state)
     }
 

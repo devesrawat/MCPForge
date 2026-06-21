@@ -1,7 +1,7 @@
 //! Shared helpers for integration tests in `tests/`.
 
 use forge_core::config::ForgeConfig;
-use forge_core::mcp::{MockMcpTransport, McpTransport, ToolRegistry};
+use forge_core::mcp::{McpTransport, MockMcpTransport, ToolRegistry};
 use std::collections::HashMap;
 use std::sync::Arc;
 

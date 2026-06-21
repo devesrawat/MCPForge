@@ -5,8 +5,7 @@ mod commands;
 #[cfg(feature = "otlp")]
 mod telemetry;
 use commands::{
-    Add, Audit, Check, Init, Logs, Ls, Remove, Report, Restart, Secret, Start, Status, Stop,
-    Watch,
+    Add, Audit, Check, Init, Logs, Ls, Remove, Report, Restart, Secret, Start, Status, Stop, Watch,
 };
 
 #[derive(Debug, Parser)]

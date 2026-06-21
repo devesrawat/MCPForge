@@ -10,17 +10,18 @@ use std::time::{Duration, Instant};
 
 /// Returns `true` if the process with the given PID is alive.
 ///
-/// On Unix this uses `kill -0` (signal 0), which checks process existence
-/// without sending a real signal.  On non-Unix platforms we conservatively
-/// assume the process is alive so the caller proceeds with the normal kill.
+/// Uses the kill(2) syscall with signal 0 directly to avoid the shell `kill`
+/// command's u32→i32 truncation bug (u32::MAX becomes -1, which signals every
+/// process and returns success). PIDs that don't fit in a positive i32 cannot
+/// exist on any Unix and are reported as dead immediately.
 fn is_pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        if pid == 0 || pid > i32::MAX as u32 {
+            return false;
+        }
+        // SAFETY: signal 0 never delivers anything; it only probes existence.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
     #[cfg(not(unix))]
     {
@@ -52,7 +53,10 @@ impl Stop {
                 if !is_pid_alive(pid) {
                     // Process is already gone; clean up the stale pid file.
                     let _ = fs::remove_file(&p);
-                    println!("Removed stale pid file (process {} is no longer running)", pid);
+                    println!(
+                        "Removed stale pid file (process {} is no longer running)",
+                        pid
+                    );
                     continue;
                 }
                 let status = Command::new("kill")
@@ -76,28 +80,6 @@ impl Stop {
         Err(anyhow!(
             "no running forge proxy found. Start one with: forge start --daemon"
         ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_pid_alive;
-
-    #[test]
-    fn current_process_is_alive() {
-        let pid = std::process::id();
-        assert!(is_pid_alive(pid), "current process should be alive");
-    }
-
-    #[test]
-    fn zero_pid_is_not_alive() {
-        // PID 0 is not a real process; kill -0 0 signals the whole process group
-        // which may or may not succeed, but PID 0 is never a forge process.
-        // We just verify is_pid_alive(u32::MAX) returns false (unlikely to exist).
-        assert!(
-            !is_pid_alive(u32::MAX),
-            "PID u32::MAX should not be alive"
-        );
     }
 }
 
@@ -134,4 +116,23 @@ fn stop_one_server(server: &str) -> Result<()> {
     }
     println!("Stop requested for server '{}' (pid {})", server, pid);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_pid_alive;
+
+    #[test]
+    fn current_process_is_alive() {
+        let pid = std::process::id();
+        assert!(is_pid_alive(pid), "current process should be alive");
+    }
+
+    #[test]
+    fn zero_pid_is_not_alive() {
+        // PID 0 is not a real process; kill -0 0 signals the whole process group
+        // which may or may not succeed, but PID 0 is never a forge process.
+        // We just verify is_pid_alive(u32::MAX) returns false (unlikely to exist).
+        assert!(!is_pid_alive(u32::MAX), "PID u32::MAX should not be alive");
+    }
 }

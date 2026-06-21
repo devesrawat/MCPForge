@@ -10,7 +10,6 @@ use axum::{
 pub mod auth;
 pub mod sse;
 
-#[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;
 
 use auth::AuthLayer;
@@ -318,12 +317,9 @@ async fn handle_mcp_request(
         Value::Array(items) => {
             // JSON-RPC 2.0 §6: an empty batch array is an invalid request.
             if items.is_empty() {
-                let body = serde_json::to_string(&JsonRpcResponse::error(
-                    -32600,
-                    "Invalid Request",
-                    None,
-                ))
-                .unwrap_or_default();
+                let body =
+                    serde_json::to_string(&JsonRpcResponse::error(-32600, "Invalid Request", None))
+                        .unwrap_or_default();
                 return (
                     StatusCode::OK,
                     [(header::CONTENT_TYPE, "application/json")],
@@ -356,10 +352,7 @@ async fn handle_mcp_request(
 }
 
 /// Process a single JSON-RPC value. Returns `None` for notifications (no `id` key).
-async fn process_single_value(
-    state: &ProxyAppState,
-    value: Value,
-) -> Option<JsonRpcResponse> {
+async fn process_single_value(state: &ProxyAppState, value: Value) -> Option<JsonRpcResponse> {
     // BUG-16: A notification is a request object with no `id` key at all.
     // `id: null` is a valid request with a null id — check key presence, not value.
     let is_notification = value
@@ -372,11 +365,7 @@ async fn process_single_value(
         Ok(r) => r,
         Err(_) => {
             // BUG-10: Return JSON-RPC parse error for malformed request objects.
-            return Some(JsonRpcResponse::error(
-                -32700,
-                "Parse error",
-                None,
-            ));
+            return Some(JsonRpcResponse::error(-32700, "Parse error", None));
         }
     };
 
@@ -547,31 +536,31 @@ fn check_policy_and_guards(
     args: &Value,
 ) -> Result<(), ProxyError> {
     // RBAC is always enforced, independent of guard.enabled.
-    if let Some(policy) = state.policies.get(server) {
-        if !policy.is_allowed(orig_tool) {
-            if let Some(aw) = &state.audit {
-                aw.log(AuditEvent::new(
-                    server,
-                    orig_tool,
-                    args,
-                    -403,
-                    0,
-                    Some("tool blocked by policy".to_owned()),
-                    None,
-                ));
-            }
-            return Err(ProxyError::policy_denied(format!(
-                "tool '{}' blocked by policy for server '{}'",
-                orig_tool, server
-            )));
+    if let Some(policy) = state.policies.get(server)
+        && !policy.is_allowed(orig_tool)
+    {
+        if let Some(aw) = &state.audit {
+            aw.log(AuditEvent::new(
+                server,
+                orig_tool,
+                args,
+                -403,
+                0,
+                Some("tool blocked by policy".to_owned()),
+                None,
+            ));
         }
+        return Err(ProxyError::policy_denied(format!(
+            "tool '{}' blocked by policy for server '{}'",
+            orig_tool, server
+        )));
     }
 
     // Rate limiting and cost guard are always enforced, independent of guard.enabled.
-    if let Some(lim) = state.rate_limiters.get(server) {
-        if lim.check().is_err() {
-            return Err(ProxyError::rate_limited(server));
-        }
+    if let Some(lim) = state.rate_limiters.get(server)
+        && lim.check().is_err()
+    {
+        return Err(ProxyError::rate_limited(server));
     }
 
     let srv_cfg = state
@@ -803,7 +792,9 @@ cmd = "true"
             .method("POST")
             .uri("/")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#))
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#,
+            ))
             .unwrap();
 
         let response = router.oneshot(request).await.unwrap();
@@ -960,7 +951,10 @@ cmd = "true"
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
-        assert!(body.is_empty(), "notification must produce empty response body");
+        assert!(
+            body.is_empty(),
+            "notification must produce empty response body"
+        );
     }
 
     /// BUG-15: Batch with a notification — the notification must be omitted from the array.
@@ -985,7 +979,11 @@ cmd = "true"
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let arr = body_json.as_array().expect("batch response must be array");
-        assert_eq!(arr.len(), 1, "notification must be omitted; only 1 response expected");
+        assert_eq!(
+            arr.len(),
+            1,
+            "notification must be omitted; only 1 response expected"
+        );
         assert_eq!(arr[0]["id"], 99);
     }
 
@@ -1012,7 +1010,10 @@ cmd = "true"
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        assert!(ct.contains("application/json"), "auth rejection must be application/json");
+        assert!(
+            ct.contains("application/json"),
+            "auth rejection must be application/json"
+        );
 
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1039,14 +1040,19 @@ cmd = "true"
             .uri("/")
             .header("content-type", "application/json")
             .header("authorization", "Bearer my-secret")
-            .body(Body::from(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#))
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#,
+            ))
             .unwrap();
 
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(body_json["error"].is_null(), "valid token should reach handler");
+        assert!(
+            body_json["error"].is_null(),
+            "valid token should reach handler"
+        );
     }
 
     /// BUG-12: tools/list must filter out denied tools and only return allowed ones.
@@ -1078,7 +1084,9 @@ deny_tools = ["admin_*"]
             .method("POST")
             .uri("/")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#))
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#,
+            ))
             .unwrap();
 
         let response = router.oneshot(request).await.unwrap();
@@ -1131,7 +1139,9 @@ allowed_tools = ["build", "test"]
             .method("POST")
             .uri("/")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#))
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#,
+            ))
             .unwrap();
 
         let response = router.oneshot(request).await.unwrap();
@@ -1141,8 +1151,14 @@ allowed_tools = ["build", "test"]
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let tools = body_json["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"local__build"), "build must be in allowed list");
-        assert!(names.contains(&"local__test"), "test must be in allowed list");
+        assert!(
+            names.contains(&"local__build"),
+            "build must be in allowed list"
+        );
+        assert!(
+            names.contains(&"local__test"),
+            "test must be in allowed list"
+        );
         assert!(
             !names.contains(&"local__deploy"),
             "deploy must be excluded by allowed_tools whitelist"
@@ -1165,7 +1181,10 @@ allowed_tools = ["build", "test"]
 
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body_json["error"]["code"], -32600, "empty batch must yield Invalid Request");
+        assert_eq!(
+            body_json["error"]["code"], -32600,
+            "empty batch must yield Invalid Request"
+        );
     }
 
     /// JSON-RPC 2.0 §4: missing jsonrpc field must return -32600 Invalid Request.
@@ -1184,7 +1203,10 @@ allowed_tools = ["build", "test"]
 
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body_json["error"]["code"], -32600, "missing jsonrpc must yield Invalid Request");
+        assert_eq!(
+            body_json["error"]["code"], -32600,
+            "missing jsonrpc must yield Invalid Request"
+        );
         assert_eq!(body_json["id"], 1);
     }
 
@@ -1196,7 +1218,9 @@ allowed_tools = ["build", "test"]
             .method("POST")
             .uri("/")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"jsonrpc":"1.0","method":"initialize","id":2}"#))
+            .body(Body::from(
+                r#"{"jsonrpc":"1.0","method":"initialize","id":2}"#,
+            ))
             .unwrap();
 
         let response = router.oneshot(request).await.unwrap();
@@ -1204,7 +1228,10 @@ allowed_tools = ["build", "test"]
 
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body_json["error"]["code"], -32600, "wrong jsonrpc version must yield Invalid Request");
+        assert_eq!(
+            body_json["error"]["code"], -32600,
+            "wrong jsonrpc version must yield Invalid Request"
+        );
         assert_eq!(body_json["id"], 2);
     }
 }

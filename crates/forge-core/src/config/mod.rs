@@ -88,7 +88,10 @@ fn is_default_injection_mode(mode: &str) -> bool {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuardConfig {
-    #[serde(default = "default_guard_enabled", skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default = "default_guard_enabled",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub enabled: bool,
 
     /// Prompt injection handling mode: "warn" or "block".
