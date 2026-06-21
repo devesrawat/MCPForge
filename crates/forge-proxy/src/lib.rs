@@ -10,7 +10,6 @@ use axum::{
 pub mod auth;
 pub mod sse;
 
-#[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;
 
 use auth::AuthLayer;
@@ -1236,3 +1235,4 @@ allowed_tools = ["build", "test"]
         assert_eq!(body_json["id"], 2);
     }
 }
+
