@@ -179,7 +179,7 @@ fn summarize_events(
         })
         .collect();
 
-    rows.sort_by(|a, b| b.calls.cmp(&a.calls));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.calls));
     rows
 }
 
