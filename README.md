@@ -180,11 +180,49 @@ max_calls_per_min = 60
 max_calls_per_day = 10000
 ```
 
-Validate config:
+Validate config (including live HTTP/SSE reachability probes):
 
 ```bash
 forge check
 ```
+
+Remote MCP servers (`transport = "http"` or `"sse"`) are probed with an MCP handshake and `tools/list`. Stdio servers still require the command to exist in `PATH`.
+
+### Remote MCP servers (HTTP / SSE)
+
+```toml
+[server.github-remote]
+transport = "http"
+url = "https://api.github.com/mcp"
+secret.Authorization = "env:GITHUB_TOKEN"
+
+[server.linear-remote]
+transport = "sse"
+url = "https://mcp.linear.app/sse"
+secret.Authorization = "env:LINEAR_TOKEN"
+```
+
+Run `forge check` to verify each remote endpoint is reachable before starting the proxy.
+
+### Proxy authentication
+
+When the proxy listens beyond localhost, require a Bearer token:
+
+```toml
+[proxy]
+enabled = true
+bind = "0.0.0.0"
+port = 3456
+auth_token = "env:FORGE_AUTH_TOKEN"
+```
+
+Clients must send the exact header form (case-sensitive):
+
+```http
+Authorization: Bearer <your-token>
+```
+
+`/.well-known/mcp-servers.json` remains public. All other routes (`/`, `/sse`, `/messages`) require auth when `auth_token` is set.
 
 ## CLI Commands
 
@@ -200,13 +238,14 @@ forge check
 | `forge status [--watch] [--json]` | Show server health |
 | `forge logs <name> [--follow] [--lines N]` | Stream or tail server logs |
 | `forge secret <set\|ls\|rm\|check>` | Manage secrets in keychain/env |
-| `forge check` | Validate config and secrets |
+| `forge check` | Validate config, secrets, and remote MCP reachability |
 | `forge audit` | Query the audit event log |
 | `forge report` | Summarise usage and latency |
 
 ## Security Model
 
 - Local binding defaults to `127.0.0.1`.
+- Optional `[proxy] auth_token` — Bearer authentication with constant-time comparison; `Authorization: Bearer <token>` required (case-sensitive prefix).
 - Request size and timeout constraints in proxy.
 - Optional injection checks for arguments and results.
 - Policy deny events are audit logged.

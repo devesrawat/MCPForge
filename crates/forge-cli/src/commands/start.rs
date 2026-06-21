@@ -28,6 +28,15 @@ pub struct Start {
     pub config: PathBuf,
 }
 
+/// RAII guard that removes `run.pid` when dropped, including on panic.
+struct PidGuard;
+
+impl Drop for PidGuard {
+    fn drop(&mut self) {
+        let _ = remove_run_pid();
+    }
+}
+
 impl Start {
     pub fn run(&self) -> Result<()> {
         if self.daemon && !self.foreground {
@@ -38,15 +47,13 @@ impl Start {
             .with_context(|| format!("failed to load config from {}", self.config.display()))?;
 
         write_run_pid().context("failed to write ~/.forge/run.pid")?;
+        let _pid_guard = PidGuard;
 
-        let out = if config.proxy.enabled {
+        if config.proxy.enabled {
             self.run_proxy(config)
         } else {
             self.run_supervisor_only(config)
-        };
-
-        let _ = remove_run_pid();
-        out
+        }
     }
 
     fn run_supervisor_only(&self, config: ForgeConfig) -> Result<()> {
@@ -59,10 +66,37 @@ impl Start {
     fn run_proxy(&self, config: ForgeConfig) -> Result<()> {
         let rt = Builder::new_multi_thread().enable_all().build()?;
         rt.block_on(async move {
-            let registry = build_tool_registry(&config).await?;
+            let registry = build_tool_registry(&config).await.map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("Broken pipe")
+                    || msg.contains("handshake")
+                    || msg.contains("initialize")
+                {
+                    // Strip internal Rust type names from the error message.
+                    // The raw error looks like:
+                    //   MCP handshake failed for 'myserver': Send message error
+                    //   Transport [rmcp::transport::child_process::TokioChildProcess] error: …
+                    // Extract just the server name from the message if present.
+                    let clean = msg
+                        .split(": Send message error")
+                        .next()
+                        .unwrap_or(&msg)
+                        .to_string();
+                    anyhow::anyhow!(
+                        "{}.\n\
+                         The command exited without responding to MCP initialize. \
+                         Verify it is a valid MCP server (test it manually).",
+                        clean
+                    )
+                } else {
+                    e
+                }
+            })?;
             let audit_path = AuditWriter::default_path()?;
             let audit = Arc::new(AuditWriter::new(audit_path)?);
-            let state = ProxyAppState::new(registry, config, Some(audit))?;
+            let auth_token = forge_core::config::resolve_proxy_auth_token(&config.proxy).await?;
+            let mut state = ProxyAppState::new(registry, config, Some(audit))?;
+            state.auth_token = auth_token;
             let addr = format!("{}:{}", state.config.proxy.bind, state.config.proxy.port);
             let listener = tokio::net::TcpListener::bind(&addr)
                 .await
@@ -88,7 +122,7 @@ impl Start {
         cmd.arg("start")
             .arg("--foreground")
             .arg("--config")
-            .arg(self.config.to_string_lossy().as_ref())
+            .arg(&self.config)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

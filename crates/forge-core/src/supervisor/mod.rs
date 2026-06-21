@@ -77,6 +77,11 @@ pub struct ServerState {
     pub uptime_secs: Option<u64>,
     pub restarts: u32,
     pub last_error: Option<String>,
+    /// Remote MCP endpoint (HTTP/SSE servers have no local PID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
 }
 
 #[derive(Debug)]
@@ -151,27 +156,37 @@ impl Supervisor {
         println!("Starting {} servers...", self.handles.len());
         println!("Press Ctrl+C to stop.");
 
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                println!("Shutting down...");
-                self.shutdown.cancel();
-            }
-            result = self.tasks.join_next() => {
-                if let Some(Ok((name, reason))) = result {
-                    match reason {
-                        ServerResult::SpawnError(e) => {
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    println!("Shutting down...");
+                    self.shutdown.cancel();
+                    break;
+                }
+                _ = self.shutdown.cancelled() => {
+                    break;
+                }
+                result = self.tasks.join_next() => {
+                    match result {
+                        None => break, // all tasks have completed
+                        Some(Ok((name, ServerResult::SpawnError(e)))) => {
                             eprintln!("error: server '{}' failed to start: {}", name, e);
+                            self.shutdown.cancel();
                         }
-                        ServerResult::MaxRestartsExceeded => {
+                        Some(Ok((name, ServerResult::MaxRestartsExceeded))) => {
                             eprintln!("error: server '{}' exceeded max restart attempts and exited", name);
+                            self.shutdown.cancel();
                         }
-                        ServerResult::CleanExit => {
+                        Some(Ok((name, ServerResult::CleanExit))) => {
                             println!("server '{}' exited cleanly", name);
+                            // Do not cancel: other servers may still be running.
                         }
-                        ServerResult::Shutdown | ServerResult::UserStopped => {}
+                        Some(Ok((_, ServerResult::Shutdown | ServerResult::UserStopped))) => {}
+                        Some(Err(e)) => {
+                            eprintln!("task join error: {}", e);
+                        }
                     }
                 }
-                self.shutdown.cancel();
             }
         }
 
@@ -417,32 +432,41 @@ async fn capture_output(
 
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
+    let mut stdout_done = false;
+    let mut stderr_done = false;
 
     loop {
+        if stdout_done && stderr_done {
+            break;
+        }
         tokio::select! {
-            result = stdout_reader.next_line() => {
+            result = stdout_reader.next_line(), if !stdout_done => {
                 match result {
                     Ok(Some(line)) => {
                         push_log(&buffer, LogStream::Stdout, line.clone()).await;
                         append_log(&mut output_file, LogStream::Stdout, line).await?;
                     }
-                    Ok(None) => break,
+                    Ok(None) => {
+                        stdout_done = true;
+                    }
                     Err(e) => {
                         tracing::warn!("error reading stdout from child process: {}", e);
-                        break;
+                        stdout_done = true;
                     }
                 }
             }
-            result = stderr_reader.next_line() => {
+            result = stderr_reader.next_line(), if !stderr_done => {
                 match result {
                     Ok(Some(line)) => {
                         push_log(&buffer, LogStream::Stderr, line.clone()).await;
                         append_log(&mut output_file, LogStream::Stderr, line).await?;
                     }
-                    Ok(None) => break,
+                    Ok(None) => {
+                        stderr_done = true;
+                    }
                     Err(e) => {
                         tracing::warn!("error reading stderr from child process: {}", e);
-                        break;
+                        stderr_done = true;
                     }
                 }
             }
@@ -548,8 +572,73 @@ fn write_state_file(
     };
 
     let json = serde_json::to_string_pretty(&state)?;
-    fs::write(state_path, json)
-        .with_context(|| format!("failed to write state file '{}'", state_path.display()))?;
+    // Atomic write: write to a temp file then rename so readers never see a
+    // partially-written state.json (matches the pattern used by config::save_to_file).
+    let dir = state_path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = dir.join(format!(".forge_state_tmp_{}", std::process::id()));
+    fs::write(&tmp, &json)
+        .with_context(|| format!("failed to write temp state file '{}'", tmp.display()))?;
+    fs::rename(&tmp, state_path)
+        .with_context(|| format!("failed to rename temp state file to '{}'", state_path.display()))?;
+    Ok(())
+}
+
+/// Write `state.json` after a successful proxy startup (stdio + HTTP/SSE backends).
+pub fn write_proxy_startup_state(
+    config: &ForgeConfig,
+    registry: &crate::mcp::ToolRegistry,
+) -> Result<()> {
+    use crate::config::Transport;
+
+    let started_at_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())?;
+
+    let pids = registry.pids();
+    let mut servers = HashMap::new();
+    for (name, srv) in &config.server {
+        let pid = pids.get(name).and_then(|entry| *entry.value());
+        let (status, url, transport) = match srv.transport {
+            Transport::Stdio => (
+                if pid.is_some() {
+                    "running".to_owned()
+                } else {
+                    "connected".to_owned()
+                },
+                None,
+                Some(srv.transport.as_str().to_owned()),
+            ),
+            Transport::Http | Transport::Sse => (
+                "connected".to_owned(),
+                srv.url.clone(),
+                Some(srv.transport.as_str().to_owned()),
+            ),
+        };
+        servers.insert(
+            name.clone(),
+            ServerState {
+                status,
+                pid,
+                uptime_secs: Some(0),
+                restarts: 0,
+                last_error: None,
+                url,
+                transport,
+            },
+        );
+    }
+
+    let state = PersistentState {
+        started_at_secs,
+        servers,
+    };
+    let path = state_file_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&state)?;
+    fs::write(&path, json)
+        .with_context(|| format!("failed to write state file '{}'", path.display()))?;
     Ok(())
 }
 
@@ -562,6 +651,8 @@ impl ServerHealth {
                 uptime_secs: None,
                 restarts: 0,
                 last_error: None,
+                url: None,
+                transport: None,
             },
             ServerHealth::Running {
                 pid,
@@ -573,6 +664,8 @@ impl ServerHealth {
                 uptime_secs: Some(*uptime_secs),
                 restarts: *restarts,
                 last_error: None,
+                url: None,
+                transport: None,
             },
             ServerHealth::Degraded {
                 restarts,
@@ -583,6 +676,8 @@ impl ServerHealth {
                 uptime_secs: None,
                 restarts: *restarts,
                 last_error: Some(last_error.clone()),
+                url: None,
+                transport: None,
             },
             ServerHealth::Stopped => ServerState {
                 status: "stopped".to_owned(),
@@ -590,6 +685,8 @@ impl ServerHealth {
                 uptime_secs: None,
                 restarts: 0,
                 last_error: None,
+                url: None,
+                transport: None,
             },
         }
     }

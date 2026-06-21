@@ -7,7 +7,32 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [0.1.1] — 2026-04-04
+## [Unreleased] — v1.0.0
+
+### Added
+
+- **Schema passthrough** — `tools/list` returns real `description` and `inputSchema` from upstream MCP servers.
+- **HTTP transport** — connect to remote MCP servers via `transport = "http"` (Streamable HTTP).
+- **Legacy SSE transport** — connect via `transport = "sse"` (MCP 2024-11-05). Marked stable; prefer `http` for new integrations.
+- **Proxy Bearer auth** — optional `[proxy] auth_token`; constant-time comparison; `/.well-known/` exempt.
+- **`forge-mock-mcp --http`** — Streamable HTTP mock server for E2E testing.
+- **`forge-mock-mcp --sse`** — legacy SSE mock server for E2E testing.
+- **QA regression suite** — `crates/forge-proxy/tests/qa_edge_cases.rs` runs in CI.
+
+### Fixed
+
+- **`forge check`** now probes HTTP/SSE servers for live MCP reachability (not just URL presence).
+- **`forge status`** shows remote endpoint URLs for HTTP/SSE backends after proxy start.
+- **`tools/list` with unknown `params.server`** now returns JSON-RPC `-32602` (invalid params) instead of `-32603`.
+- Invalid `FORGE_TOOL_CACHE_TTL_SECS` values log a warning and fall back to the 60s default.
+
+### Changed
+
+- **Default tool cache TTL** reduced from 300s to 60s (`FORGE_TOOL_CACHE_TTL_SECS` still overrides).
+- **`ServerConfig.cmd`** is now optional (required only for `transport = "stdio"`).
+- **`forge-mock-mcp` stdio tools** — default two tools remain **`echo`** and **`ping`** for backward compatibility; additional tools use `tool_2`, `tool_3`, …
+
+---
 
 ### Fixed
 

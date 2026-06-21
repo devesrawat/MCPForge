@@ -15,8 +15,7 @@ cmd = "true"
 "#,
             "github",
             vec!["search"],
-        )
-        .await;
+        );
         let router = build_router(state);
         let req = Request::builder()
             .method("GET")
@@ -58,8 +57,7 @@ cmd = "true"
 "#,
             "local",
             vec![],
-        )
-        .await;
+        );
         let router = build_router(state);
         let req = Request::builder()
             .method("GET")
@@ -87,8 +85,7 @@ cmd = "true"
 "#,
             "local",
             vec!["ping"],
-        )
-        .await;
+        );
         let router = build_router(state);
         // 11 MB exceeds the 10 MB limit
         let big_body = vec![b'x'; 11 * 1024 * 1024];
@@ -136,11 +133,7 @@ cmd = "true"
     use std::sync::Arc;
     use tower::util::ServiceExt;
 
-    fn make_state(
-        toml: &str,
-        server: &str,
-        tools: Vec<&str>,
-    ) -> impl std::future::Future<Output = ProxyAppState> {
+    fn make_state(toml: &str, server: &str, tools: Vec<&str>) -> ProxyAppState {
         let cfg = ForgeConfig::parse_str(toml).expect("config parse");
         let mut transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
         transports.insert(
@@ -149,11 +142,7 @@ cmd = "true"
                 tools.into_iter().map(str::to_owned).collect::<Vec<_>>(),
             )),
         );
-        async move {
-            ProxyAppState::new(ToolRegistry::new(transports), cfg, None)
-                .await
-                .expect("state")
-        }
+        ProxyAppState::new(ToolRegistry::new(transports), cfg, None).expect("state")
     }
 
     async fn post_rpc(state: ProxyAppState, body: serde_json::Value) -> serde_json::Value {
@@ -183,11 +172,11 @@ cmd = "true"
 "#,
             "local",
             vec!["search"],
-        )
-        .await;
+        );
         let resp = post_rpc(
             state,
             json!({
+                "jsonrpc": "2.0",
                 "method": "tools/call",
                 "params": {
                     "name": "local__search",
@@ -224,11 +213,11 @@ cmd = "true"
 "#,
             "local",
             vec!["search"],
-        )
-        .await;
+        );
         let resp = post_rpc(
             state,
             json!({
+                "jsonrpc": "2.0",
                 "method": "tools/call",
                 "params": {
                     "name": "local__search",
@@ -261,11 +250,11 @@ deny_tools = ["admin_*"]
 "#,
             "local",
             vec!["admin_reset", "safe_query"],
-        )
-        .await;
+        );
         let resp = post_rpc(
             state,
             json!({
+                "jsonrpc": "2.0",
                 "method": "tools/call",
                 "params": { "name": "local__admin_reset", "arguments": {} },
                 "id": 3
@@ -304,8 +293,7 @@ max_calls_per_min = 1
 "#,
             "local",
             vec!["ping"],
-        )
-        .await;
+        );
 
         // Share the state across both calls via Arc so the rate-limiter state persists.
         let router = build_router(state);
@@ -317,6 +305,7 @@ max_calls_per_min = 1
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
+                        "jsonrpc": "2.0",
                         "method": "tools/call",
                         "params": { "name": "local__ping", "arguments": {} },
                         "id": 1
@@ -375,11 +364,11 @@ deny_tools = ["admin_*"]
 "#,
             "local",
             vec!["safe_query"],
-        )
-        .await;
+        );
         let resp = post_rpc(
             state,
             json!({
+                "jsonrpc": "2.0",
                 "method": "tools/call",
                 "params": { "name": "local__safe_query", "arguments": {} },
                 "id": 4
@@ -403,8 +392,7 @@ cmd = "true"
 "#,
             "local",
             vec!["ping"],
-        )
-        .await;
+        );
         let router = build_router(state);
 
         // Open the SSE stream — should return 200 with text/event-stream.

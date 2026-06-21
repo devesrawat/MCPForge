@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{Duration, TimeZone, Utc};
 use clap::{Args, ValueEnum};
-use forge_core::audit::{AuditQuery, AuditReader};
+use forge_core::audit::{AuditQuery, AuditReader, latency_ms_f64};
 use forge_core::config::ForgeConfig;
 use serde::Serialize;
 use serde_json::json;
@@ -56,7 +56,7 @@ impl Report {
         let cost_per_server = load_cost_map();
 
         let rows = summarize_events(&events, &cost_per_server);
-        let total = summarize_totals(&rows);
+        let total = summarize_totals(&rows, &events);
 
         match self.format {
             OutputFormat::Json => {
@@ -75,7 +75,7 @@ impl Report {
                 println!("Server    Calls   Errors   Err%    Avg lat   P99 lat   Est cost");
                 for row in &rows {
                     println!(
-                        "{:<8} {:>6} {:>7} {:>6.1}% {:>8}ms {:>8}ms ${:>6.2}",
+                        "{:<8} {:>6} {:>7} {:>6.1}% {:>8.2}ms {:>8.2}ms ${:>6.2}",
                         row.server,
                         row.calls,
                         row.errors,
@@ -86,7 +86,7 @@ impl Report {
                     );
                 }
                 println!(
-                    "{:<8} {:>6} {:>7} {:>6.1}% {:>8}ms {:>8}ms ${:>6.2}",
+                    "{:<8} {:>6} {:>7} {:>6.1}% {:>8.2}ms {:>8.2}ms ${:>6.2}",
                     "TOTAL",
                     total.calls,
                     total.errors,
@@ -117,7 +117,7 @@ struct ReportRow {
     errors: usize,
     error_rate: f64,
     avg_latency: f64,
-    p99_latency: u64,
+    p99_latency: f64,
     cost: f64,
 }
 
@@ -149,12 +149,12 @@ fn summarize_events(
             let avg_latency = if calls == 0 {
                 0.0
             } else {
-                events.iter().map(|e| e.latency_ms as f64).sum::<f64>() / calls as f64
+                events.iter().map(|&e| latency_ms_f64(e)).sum::<f64>() / calls as f64
             };
-            let mut latencies: Vec<u64> = events.iter().map(|e| e.latency_ms).collect();
-            latencies.sort_unstable();
+            let mut latencies: Vec<f64> = events.iter().map(|&e| latency_ms_f64(e)).collect();
+            latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let p99_latency = if latencies.is_empty() {
-                0
+                0.0
             } else {
                 let index = latencies.len().saturating_mul(99).div_ceil(100);
                 let index = index.saturating_sub(1).min(latencies.len() - 1);
@@ -183,7 +183,10 @@ fn summarize_events(
     rows
 }
 
-fn summarize_totals(rows: &[ReportRow]) -> ReportRow {
+fn summarize_totals(
+    rows: &[ReportRow],
+    events: &[forge_core::audit::AuditRecord],
+) -> ReportRow {
     let calls = rows.iter().map(|row| row.calls).sum();
     let errors = rows.iter().map(|row| row.errors).sum();
     let total_latency: f64 = rows
@@ -195,11 +198,16 @@ fn summarize_totals(rows: &[ReportRow]) -> ReportRow {
     } else {
         total_latency / calls as f64
     };
-    let p99_latency = rows
-        .iter()
-        .flat_map(|row| std::iter::repeat_n(row.p99_latency, row.calls))
-        .max()
-        .unwrap_or(0);
+    // Compute true combined p99 from raw event latencies.
+    let mut latencies: Vec<f64> = events.iter().map(latency_ms_f64).collect();
+    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p99_latency = if latencies.is_empty() {
+        0.0
+    } else {
+        let index = latencies.len().saturating_mul(99).div_ceil(100);
+        let index = index.saturating_sub(1).min(latencies.len() - 1);
+        latencies[index]
+    };
     let cost: f64 = rows.iter().map(|row| row.cost).sum();
 
     ReportRow {

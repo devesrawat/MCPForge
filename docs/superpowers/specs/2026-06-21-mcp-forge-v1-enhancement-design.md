@@ -1,8 +1,8 @@
 # mcp-forge v1.0 Enhancement Design
 
-**Date:** 2026-06-21  
-**Branch:** development  
-**Status:** Approved  
+**Date:** 2026-06-21
+**Branch:** development
+**Status:** Approved
 
 ---
 
@@ -88,19 +88,23 @@ Data flow is unchanged: every tool call, regardless of transport, passes through
 Four test additions, all in existing test files:
 
 **RBAC deny path** (`forge-proxy/tests/security_hardening.rs`):
+
 - Configure a server with `deny_tools = ["delete_*"]`
 - Call `delete_repo` via proxy
 - Assert response error code is `-32001` and body contains `"policy"`
 
 **Injection block path** (`forge-proxy/tests/security_hardening.rs`):
+
 - Set `guard.injection_mode = "block"`
 - Call a tool with args containing `"ignore all previous instructions"`
 - Assert response error code is `-32002`
 
 **Cost guard boundary** (`forge-proxy/src/lib.rs` `#[cfg(test)]`):
+
 - Already has concurrent test — extend to verify exactly-at-limit behaviour and day rollover using a mocked clock via `FORGE_TEST_DAY_KEY` env var
 
 **Proxy E2E round-trip** (`forge-proxy/tests/`):
+
 - `MockMcpTransport` with two tools
 - Build `ProxyAppState`, spin up `build_router`
 - `tools/list` → assert two namespaced tools returned with correct names
@@ -309,6 +313,7 @@ pub struct AuthLayer {
 ```
 
 Applied at router level, before all handlers except `/.well-known/`. On every request:
+
 1. If `token` is `None` → pass through
 2. Extract `Authorization` header. If missing → `401 Unauthorized`
 3. Strip `"Bearer "` prefix. Compare with stored token using constant-time equality (`subtle` crate, already transitively available)
@@ -356,11 +361,13 @@ forge-proxy: dispatch_request
 **Phase 2 tests:** Update existing `tools_list_returns_namespaced_tools` proxy test to assert `inputSchema` is non-empty when `MockMcpTransport::with_schemas()` is used.
 
 **Phase 3 tests:**
+
 - Unit: `HttpMcpTransport::connect_*` against `forge-mock-mcp --http` in the same process
 - Integration: full proxy E2E with an HTTP backend using `forge-mock-mcp`
 - `forge check` HTTP reachability test using `forge-mock-mcp --http`
 
 **Phase 4 tests:**
+
 - Auth middleware: request without token → 401
 - Auth middleware: request with wrong token → 401
 - Auth middleware: correct token → 200
@@ -384,6 +391,7 @@ No new crates required beyond rmcp feature flags and `subtle`.
 Phase 1 ships as a patch (`v0.1.2`). Phases 2-4 ship together as `v1.0.0` — they form a coherent feature story: "real schemas, remote servers, auth."
 
 v1.0.0 checklist update:
+
 - [ ] `tools/list` returns real schemas for all server types
 - [ ] `http` and `sse` transport configured and working
 - [ ] Bearer token auth validated end-to-end

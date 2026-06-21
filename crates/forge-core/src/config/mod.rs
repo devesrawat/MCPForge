@@ -22,59 +22,80 @@ pub struct ForgeConfig {
     pub proxy: ProxyConfig,
 }
 
+fn is_default_transport(t: &Transport) -> bool {
+    *t == Transport::Stdio
+}
+
+fn is_default_rate_limit(v: &u32) -> bool {
+    *v == default_rate_limit()
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cmd: Option<String>,
 
-    #[serde(default = "default_transport")]
+    #[serde(
+        default = "default_transport",
+        skip_serializing_if = "is_default_transport"
+    )]
     pub transport: Transport,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub secret: HashMap<String, SecretRef>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_tools: Vec<String>,
 
-    #[serde(default = "default_rate_limit")]
+    #[serde(
+        default = "default_rate_limit",
+        skip_serializing_if = "is_default_rate_limit"
+    )]
     pub max_calls_per_min: u32,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_calls_per_day: Option<u32>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_timeout_secs: Option<u64>,
 
     /// Optional estimated USD cost per tool call (for `forge report`).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_cost_per_call_usd: Option<f64>,
 
     /// Maximum number of consecutive restarts before giving up (default: 5).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_restarts: Option<u32>,
+}
+
+fn is_default_injection_mode(mode: &str) -> bool {
+    mode == default_injection_mode()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuardConfig {
-    #[serde(default = "default_guard_enabled")]
+    #[serde(default = "default_guard_enabled", skip_serializing_if = "std::ops::Not::not")]
     pub enabled: bool,
 
     /// Prompt injection handling mode: "warn" or "block".
-    #[serde(default = "default_injection_mode")]
+    #[serde(
+        default = "default_injection_mode",
+        skip_serializing_if = "is_default_injection_mode"
+    )]
     pub injection_mode: String,
 }
 
@@ -95,22 +116,36 @@ impl Default for GuardConfig {
     }
 }
 
+fn is_default_proxy_bind(bind: &str) -> bool {
+    bind == default_proxy_bind()
+}
+
+fn is_default_proxy_port(port: &u16) -> bool {
+    *port == default_proxy_port()
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub enabled: bool,
 
-    #[serde(default = "default_proxy_bind")]
+    #[serde(
+        default = "default_proxy_bind",
+        skip_serializing_if = "is_default_proxy_bind"
+    )]
     pub bind: String,
 
-    #[serde(default = "default_proxy_port")]
+    #[serde(
+        default = "default_proxy_port",
+        skip_serializing_if = "is_default_proxy_port"
+    )]
     pub port: u16,
 
     /// Optional Bearer token for proxy authentication.
     /// If set, all requests (except `/.well-known/`) must include
     /// `Authorization: Bearer <token>`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<SecretRef>,
 }
 
@@ -213,4 +248,18 @@ pub async fn resolve_server_env(config: &ServerConfig) -> anyhow::Result<HashMap
         env_vars.insert(key.clone(), value.expose_secret().to_owned());
     }
     Ok(env_vars)
+}
+
+pub async fn resolve_proxy_auth_token(config: &ProxyConfig) -> anyhow::Result<Option<String>> {
+    let resolver = DefaultSecretResolver;
+    match &config.auth_token {
+        None => Ok(None),
+        Some(secret_ref) => {
+            let secret = resolver
+                .resolve("proxy", secret_ref)
+                .await
+                .context("failed to resolve proxy.auth_token")?;
+            Ok(Some(secret.expose_secret().to_owned()))
+        }
+    }
 }

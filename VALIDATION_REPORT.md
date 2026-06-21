@@ -144,7 +144,7 @@ File: `crates/forge-core/src/audit.rs`
 
 **M6 — Tool cache: stale after server restart**
 File: `crates/forge-core/src/mcp.rs`, `ToolRegistry`
-Cache TTL is per-entry wall-clock time. If a server restarts and exposes different tools, the old list remains valid for up to `FORGE_TOOL_CACHE_TTL_SECS` (default 300 s).
+Cache TTL is per-entry wall-clock time. If a server restarts and exposes different tools, the old list remains valid for up to `FORGE_TOOL_CACHE_TTL_SECS` (default 60 s).
 **Risk:** Proxy routes calls to tools that no longer exist on the restarted server.
 
 **M7 — `supervisor.rs` test: unsafe `env::set_var`**

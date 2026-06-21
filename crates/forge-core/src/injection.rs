@@ -75,13 +75,16 @@ impl InjectionDetector {
         None
     }
 
-    /// Scan tool arguments (JSON object) for injection
+    /// Scan tool arguments (JSON object) for injection.
+    /// Returns the first alert found using a sorted key walk for determinism.
     pub fn scan_arguments(&self, args: &Value) -> Option<InjectionAlert> {
         match args {
             Value::String(s) => self.scan(s),
             Value::Object(obj) => {
-                for value in obj.values() {
-                    if let Some(alert) = self.scan_value(value) {
+                let mut keys: Vec<&String> = obj.keys().collect();
+                keys.sort();
+                for key in keys {
+                    if let Some(alert) = self.scan_value(&obj[key]) {
                         return Some(alert);
                     }
                 }
@@ -99,6 +102,13 @@ impl InjectionDetector {
         }
     }
 
+    /// Scan tool arguments and return *all* injection alerts found (sorted key walk).
+    pub fn scan_all_arguments(&self, args: &Value) -> Vec<InjectionAlert> {
+        let mut alerts = Vec::new();
+        self.collect_alerts(args, &mut alerts);
+        alerts
+    }
+
     /// Scan a tool result for indirect injection (OPT-26)
     pub fn scan_result(&self, result: &Value) -> Option<InjectionAlert> {
         self.scan_value(result)
@@ -108,8 +118,10 @@ impl InjectionDetector {
         match value {
             Value::String(s) => self.scan(s),
             Value::Object(obj) => {
-                for v in obj.values() {
-                    if let Some(alert) = self.scan_value(v) {
+                let mut keys: Vec<&String> = obj.keys().collect();
+                keys.sort();
+                for key in keys {
+                    if let Some(alert) = self.scan_value(&obj[key]) {
                         return Some(alert);
                     }
                 }
@@ -124,6 +136,29 @@ impl InjectionDetector {
                 None
             }
             _ => None,
+        }
+    }
+
+    fn collect_alerts(&self, value: &Value, alerts: &mut Vec<InjectionAlert>) {
+        match value {
+            Value::String(s) => {
+                if let Some(alert) = self.scan(s) {
+                    alerts.push(alert);
+                }
+            }
+            Value::Object(obj) => {
+                let mut keys: Vec<&String> = obj.keys().collect();
+                keys.sort();
+                for key in keys {
+                    self.collect_alerts(&obj[key], alerts);
+                }
+            }
+            Value::Array(arr) => {
+                for v in arr {
+                    self.collect_alerts(v, alerts);
+                }
+            }
+            _ => {}
         }
     }
 

@@ -1,6 +1,6 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -21,6 +21,8 @@ pub struct AuditRecord {
     pub args_json: Option<String>,
     pub result_code: i32,
     pub latency_ms: u64,
+    /// Sub-millisecond latency precision (microseconds). Present on v3+ databases.
+    pub latency_us: Option<u64>,
     pub error: Option<String>,
     pub session_id: Option<String>,
 }
@@ -43,6 +45,8 @@ pub struct AuditEvent {
     pub args_json: Option<String>,
     pub result_code: i32,
     pub latency_ms: u64,
+    /// Sub-millisecond latency precision (microseconds). Present on v3+ databases.
+    pub latency_us: Option<u64>,
     pub error: Option<String>,
     pub session_id: Option<String>,
 }
@@ -57,8 +61,35 @@ impl AuditEvent {
         error: Option<String>,
         session_id: Option<String>,
     ) -> Self {
+        Self::new_with_latency_us(
+            server,
+            tool,
+            args,
+            result_code,
+            latency_ms.saturating_mul(1000),
+            error,
+            session_id,
+        )
+    }
+
+    pub fn new_with_latency_us(
+        server: impl Into<String>,
+        tool: impl Into<String>,
+        args: &Value,
+        result_code: i32,
+        latency_us: u64,
+        error: Option<String>,
+        session_id: Option<String>,
+    ) -> Self {
         let args_hash = Self::hash_args(args);
-        let args_json = serde_json::to_string(args).ok();
+        // Store full args only when FORGE_AUDIT_STORE_ARGS=1; otherwise scrub
+        // sensitive keys before persisting to protect secrets at rest.
+        let args_json = if std::env::var("FORGE_AUDIT_STORE_ARGS").as_deref() == Ok("1") {
+            serde_json::to_string(args).ok()
+        } else {
+            let scrubbed = scrub_args(args);
+            serde_json::to_string(&scrubbed).ok()
+        };
         Self {
             id: Uuid::new_v4().to_string(),
             ts: Utc::now().timestamp_millis(),
@@ -67,10 +98,25 @@ impl AuditEvent {
             args_hash,
             args_json,
             result_code,
-            latency_ms,
+            latency_ms: latency_us / 1000,
+            latency_us: Some(latency_us),
             error,
             session_id,
         }
+    }
+
+    /// Deprecated: use [`Self::new_with_latency_us`] instead.
+    #[deprecated(since = "0.1.0", note = "use new_with_latency_us")]
+    pub fn with_latency(
+        server: impl Into<String>,
+        tool: impl Into<String>,
+        args: &Value,
+        result_code: i32,
+        latency_us: u64,
+        error: Option<String>,
+        session_id: Option<String>,
+    ) -> Self {
+        Self::new_with_latency_us(server, tool, args, result_code, latency_us, error, session_id)
     }
 
     fn hash_args(args: &Value) -> String {
@@ -82,6 +128,38 @@ impl AuditEvent {
     }
 }
 
+/// Scrub sensitive keys from a JSON value before persisting to the audit log.
+/// Keys whose names contain any of the sensitive patterns are replaced with
+/// `"[redacted]"`. Non-object values are returned as-is.
+fn scrub_args(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let scrubbed = map
+                .iter()
+                .map(|(k, v)| {
+                    let v2 = if is_sensitive_key(k) {
+                        Value::String("[redacted]".to_owned())
+                    } else {
+                        scrub_args(v)
+                    };
+                    (k.clone(), v2)
+                })
+                .collect();
+            Value::Object(scrubbed)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(scrub_args).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Returns true when a key name suggests it may hold a sensitive credential.
+fn is_sensitive_key(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    ["password", "token", "secret", "api_key", "auth", "key", "credential"]
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+}
+
 pub struct AuditWriter {
     tx: Sender<AuditEvent>,
 }
@@ -90,18 +168,15 @@ impl AuditWriter {
     /// Read the on-disk schema version and apply migrations if needed.
     /// Returns an error if the database was written by a newer version of forge.
     fn ensure_schema(conn: &Connection) -> Result<()> {
-        let on_disk: Option<i64> =
-            match conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
-                r.get(0)
-            }) {
-                Ok(v) => Some(v),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => {
-                    return Err(
-                        anyhow!(e).context("failed to read schema_version from audit database")
-                    );
-                }
-            };
+        // MAX(version) returns NULL (not QueryReturnedNoRows) on an empty table,
+        // so a single query_row call always succeeds.
+        let on_disk: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(version) FROM schema_version",
+                [],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .with_context(|| "failed to read schema_version from audit database")?;
 
         match on_disk {
             None => {
@@ -119,15 +194,28 @@ impl AuditWriter {
                     Self::SCHEMA_VERSION
                 );
             }
-            Some(1) => {
-                // v1 → v2: add args_json column.
-                conn.execute(
-                    "ALTER TABLE audit_events ADD COLUMN args_json TEXT",
-                    [],
+            Some(2) => {
+                // v2 → v3: add latency_us column for sub-millisecond precision.
+                // Wrapped in a transaction so a crash mid-migration leaves the DB
+                // in a consistent state (still at v2, not half-migrated).
+                conn.execute_batch(
+                    "BEGIN;
+                     ALTER TABLE audit_events ADD COLUMN latency_us INTEGER;
+                     UPDATE audit_events SET latency_us = latency_ms * 1000 WHERE latency_us IS NULL;
+                     UPDATE schema_version SET version = 3;
+                     COMMIT;",
                 )?;
-                conn.execute(
-                    "UPDATE schema_version SET version = ?1",
-                    rusqlite::params![2],
+            }
+            Some(1) => {
+                // v1 → v3: add args_json and latency_us in a single transaction
+                // so a crash at any point leaves the DB still at v1 (fully re-runnable).
+                conn.execute_batch(
+                    "BEGIN;
+                     ALTER TABLE audit_events ADD COLUMN args_json TEXT;
+                     ALTER TABLE audit_events ADD COLUMN latency_us INTEGER;
+                     UPDATE audit_events SET latency_us = latency_ms * 1000 WHERE latency_us IS NULL;
+                     UPDATE schema_version SET version = 3;
+                     COMMIT;",
                 )?;
             }
             Some(_) => {
@@ -143,7 +231,7 @@ impl AuditWriter {
 
     /// Current schema version. Bump this whenever the table layout changes and
     /// add a corresponding migration branch in `migrate_schema`.
-    const SCHEMA_VERSION: i64 = 2;
+    const SCHEMA_VERSION: i64 = 3;
 
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let db_path = path.as_ref().to_owned();
@@ -164,6 +252,7 @@ impl AuditWriter {
                  args_json   TEXT,
                  result_code INTEGER,
                  latency_ms  INTEGER,
+                 latency_us  INTEGER,
                  error       TEXT,
                  session_id  TEXT
              ) STRICT;
@@ -223,6 +312,7 @@ impl AuditReader {
                  args_json   TEXT,
                  result_code INTEGER,
                  latency_ms  INTEGER,
+                 latency_us  INTEGER,
                  error       TEXT,
                  session_id  TEXT
              ) STRICT;
@@ -235,28 +325,46 @@ impl AuditReader {
     }
 
     fn migrate_if_needed(conn: &Connection) -> Result<()> {
-        let on_disk: Option<i64> =
-            match conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
-                r.get(0)
-            }) {
-                Ok(v) => Some(v),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(_) => Some(0),
-            };
-        if on_disk == Some(1) {
-            conn.execute(
-                "ALTER TABLE audit_events ADD COLUMN args_json TEXT",
+        // MAX(version) returns NULL on an empty table — no need to special-case
+        // QueryReturnedNoRows. ORDER BY / MAX also prevents a stale low-version
+        // row from being picked up if the table ever has duplicates.
+        let on_disk: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(version) FROM schema_version",
                 [],
-            )?;
-            conn.execute(
-                "UPDATE schema_version SET version = ?1",
-                rusqlite::params![2],
-            )?;
-        } else if on_disk.is_none() {
-            conn.execute(
-                "INSERT INTO schema_version (version) VALUES (?1)",
-                rusqlite::params![2],
-            )?;
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .with_context(|| "failed to read schema_version from audit database")?;
+
+        match on_disk {
+            None => {
+                conn.execute(
+                    "INSERT INTO schema_version (version) VALUES (?1)",
+                    rusqlite::params![AuditWriter::SCHEMA_VERSION],
+                )?;
+            }
+            Some(1) => {
+                // v1 → v3 in one transaction: crash at any point leaves DB at v1.
+                conn.execute_batch(
+                    "BEGIN;
+                     ALTER TABLE audit_events ADD COLUMN args_json TEXT;
+                     ALTER TABLE audit_events ADD COLUMN latency_us INTEGER;
+                     UPDATE audit_events SET latency_us = latency_ms * 1000 WHERE latency_us IS NULL;
+                     UPDATE schema_version SET version = 3;
+                     COMMIT;",
+                )?;
+            }
+            Some(2) => {
+                // v2 → v3 in one transaction.
+                conn.execute_batch(
+                    "BEGIN;
+                     ALTER TABLE audit_events ADD COLUMN latency_us INTEGER;
+                     UPDATE audit_events SET latency_us = latency_ms * 1000 WHERE latency_us IS NULL;
+                     UPDATE schema_version SET version = 3;
+                     COMMIT;",
+                )?;
+            }
+            Some(_) => {}
         }
         Ok(())
     }
@@ -271,7 +379,7 @@ impl AuditReader {
         limit: Option<usize>,
     ) -> Result<Vec<AuditRecord>> {
         let mut sql = String::from(
-            "SELECT id, ts, server, tool, args_hash, args_json, result_code, latency_ms, error, session_id
+            "SELECT id, ts, server, tool, args_hash, args_json, result_code, latency_ms, latency_us, error, session_id
              FROM audit_events
              WHERE 1=1",
         );
@@ -301,20 +409,7 @@ impl AuditReader {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let params_refs = params_from_vec(&params);
-        let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            Ok(AuditRecord {
-                id: row.get(0)?,
-                ts: row.get(1)?,
-                server: row.get(2)?,
-                tool: row.get(3)?,
-                args_hash: row.get(4)?,
-                args_json: row.get(5)?,
-                result_code: row.get(6)?,
-                latency_ms: u64::try_from(row.get::<_, i64>(7)?).unwrap_or(0),
-                error: row.get(8)?,
-                session_id: row.get(9)?,
-            })
-        })?;
+        let rows = stmt.query_map(params_refs.as_slice(), row_to_audit_record)?;
 
         rows.collect::<Result<Vec<_>, rusqlite::Error>>()
             .map_err(|err| anyhow!(err))
@@ -324,30 +419,55 @@ impl AuditReader {
     /// to poll for new records and render them live in the TUI.
     pub fn poll_new(&self, last_ts: i64, max_rows: usize) -> Result<Vec<AuditRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, ts, server, tool, args_hash, args_json, result_code, latency_ms, error, session_id
+            "SELECT id, ts, server, tool, args_hash, args_json, result_code, latency_ms, latency_us, error, session_id
              FROM audit_events
              WHERE ts > ?
              ORDER BY ts ASC
              LIMIT ?",
         )?;
-        let rows = stmt.query_map(params![last_ts, i64::try_from(max_rows).unwrap_or(i64::MAX)], |row| {
-            Ok(AuditRecord {
-                id: row.get(0)?,
-                ts: row.get(1)?,
-                server: row.get(2)?,
-                tool: row.get(3)?,
-                args_hash: row.get(4)?,
-                args_json: row.get(5)?,
-                result_code: row.get(6)?,
-                latency_ms: u64::try_from(row.get::<_, i64>(7)?).unwrap_or(0),
-                error: row.get(8)?,
-                session_id: row.get(9)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![last_ts, i64::try_from(max_rows).unwrap_or(i64::MAX)],
+            row_to_audit_record,
+        )?;
 
         rows.collect::<Result<Vec<_>, rusqlite::Error>>()
             .map_err(|err| anyhow!(err))
     }
+}
+
+fn row_to_audit_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRecord> {
+    let latency_us = row
+        .get::<_, Option<i64>>(8)?
+        .map(|v| u64::try_from(v).unwrap_or(0));
+    Ok(AuditRecord {
+        id: row.get(0)?,
+        ts: row.get(1)?,
+        server: row.get(2)?,
+        tool: row.get(3)?,
+        args_hash: row.get(4)?,
+        args_json: row.get(5)?,
+        result_code: row.get(6)?,
+        latency_ms: u64::try_from(row.get::<_, i64>(7)?).unwrap_or(0),
+        latency_us,
+        error: row.get(9)?,
+        session_id: row.get(10)?,
+    })
+}
+
+/// Format latency for CLI display, using microsecond precision when available.
+pub fn format_latency(record: &AuditRecord) -> String {
+    match record.latency_us {
+        Some(us) => format!("{:.2}ms", us as f64 / 1000.0),
+        None => format!("{}ms", record.latency_ms),
+    }
+}
+
+/// Latency in floating-point milliseconds.
+pub fn latency_ms_f64(record: &AuditRecord) -> f64 {
+    record
+        .latency_us
+        .map(|us| us as f64 / 1000.0)
+        .unwrap_or(record.latency_ms as f64)
 }
 
 fn params_from_vec(params: &[Box<dyn rusqlite::ToSql>]) -> Vec<&dyn rusqlite::ToSql> {
@@ -362,8 +482,8 @@ fn insert_batch(conn: &mut Connection, batch: &[AuditEvent]) -> Result<()> {
     {
         let mut stmt = tx.prepare(
             "INSERT OR IGNORE INTO audit_events
-             (id, ts, server, tool, args_hash, args_json, result_code, latency_ms, error, session_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, ts, server, tool, args_hash, args_json, result_code, latency_ms, latency_us, error, session_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )?;
 
         for event in batch {
@@ -376,6 +496,9 @@ fn insert_batch(conn: &mut Connection, batch: &[AuditEvent]) -> Result<()> {
                 event.args_json,
                 event.result_code,
                 i64::try_from(event.latency_ms).unwrap_or(i64::MAX),
+                event
+                    .latency_us
+                    .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
                 event.error,
                 event.session_id,
             ])?;
@@ -460,7 +583,7 @@ mod tests {
         let db_path = file.path().to_path_buf();
 
         // Create and write events directly (no writer thread).
-        let mut conn = Connection::open(&db_path).expect("open");
+        let conn = Connection::open(&db_path).expect("open");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS audit_events (
@@ -471,11 +594,8 @@ mod tests {
              CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);",
         )
         .expect("exec");
-        conn.execute(
-            "INSERT INTO schema_version (version) VALUES (2)",
-            [],
-        )
-        .expect("stamp");
+        conn.execute("INSERT INTO schema_version (version) VALUES (2)", [])
+            .expect("stamp");
 
         let mut stmt = conn
             .prepare(
@@ -483,12 +603,30 @@ mod tests {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .expect("prepare");
-        stmt.execute(params!["e1", 1000, "alpha", "t1", "h1", r#"{"x":1}"#, 0, 10])
-            .expect("ins");
+        stmt.execute(params![
+            "e1",
+            1000,
+            "alpha",
+            "t1",
+            "h1",
+            r#"{"x":1}"#,
+            0,
+            10
+        ])
+        .expect("ins");
         stmt.execute(params!["e2", 2000, "beta", "t2", "h2", r#"{"x":2}"#, 0, 20])
             .expect("ins");
-        stmt.execute(params!["e3", 3000, "alpha", "t3", "h3", r#"{"x":3}"#, -1, 30])
-            .expect("ins");
+        stmt.execute(params![
+            "e3",
+            3000,
+            "alpha",
+            "t3",
+            "h3",
+            r#"{"x":3}"#,
+            -1,
+            30
+        ])
+        .expect("ins");
 
         let reader = AuditReader::open(&db_path).expect("reader");
 
@@ -549,5 +687,87 @@ mod tests {
             .expect("errors");
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].tool, "t2");
+    }
+
+    /// Verify AuditReader migrates a v1 schema (no args_json, no latency_us) up
+    /// to the current v3 schema without data loss.
+    #[test]
+    fn migrate_if_needed_v1_to_v3() {
+        let file = NamedTempFile::new().expect("temp file");
+        let db_path = file.path().to_path_buf();
+
+        // Create a v1 database manually (no args_json or latency_us columns).
+        let conn = Connection::open(&db_path).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             CREATE TABLE audit_events (
+                 id TEXT PRIMARY KEY,
+                 ts INTEGER NOT NULL,
+                 server TEXT NOT NULL,
+                 tool TEXT NOT NULL,
+                 args_hash TEXT,
+                 result_code INTEGER,
+                 latency_ms INTEGER,
+                 error TEXT,
+                 session_id TEXT
+             ) STRICT;
+             INSERT INTO schema_version (version) VALUES (1);
+             INSERT INTO audit_events (id, ts, server, tool, args_hash, result_code, latency_ms)
+             VALUES ('v1-row', 1000, 'srv', 'op', 'h1', 0, 42);",
+        )
+        .expect("setup v1 db");
+        drop(conn);
+
+        // Opening via AuditReader should migrate v1 → v3 in one transaction.
+        let reader = AuditReader::open(&db_path).expect("migrate open");
+
+        // Verify the migrated event can be read back with the new columns present.
+        let events = reader
+            .query_events(AuditQuery::default(), Some(10))
+            .expect("query after migration");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, "v1-row");
+        assert_eq!(events[0].server, "srv");
+        assert_eq!(events[0].tool, "op");
+        assert_eq!(events[0].latency_ms, 42);
+        // latency_us should have been back-filled: 42 ms × 1000 = 42 000 µs.
+        assert_eq!(events[0].latency_us, Some(42_000));
+        // args_json is NULL in the v1 row — should come back as None.
+        assert!(events[0].args_json.is_none());
+    }
+
+    /// Verify that MAX(version) is used rather than an arbitrary LIMIT 1 —
+    /// a database with two rows in schema_version should report the higher one.
+    #[test]
+    fn migrate_if_needed_reads_max_version() {
+        let file = NamedTempFile::new().expect("temp file");
+        let db_path = file.path().to_path_buf();
+
+        let conn = Connection::open(&db_path).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             CREATE TABLE audit_events (
+                 id TEXT PRIMARY KEY,
+                 ts INTEGER NOT NULL,
+                 server TEXT NOT NULL,
+                 tool TEXT NOT NULL,
+                 args_hash TEXT,
+                 args_json TEXT,
+                 result_code INTEGER,
+                 latency_ms INTEGER,
+                 latency_us INTEGER,
+                 error TEXT,
+                 session_id TEXT
+             ) STRICT;
+             -- Simulate a DB that was partially written with two version rows.
+             -- The migration should see MAX = 3 (current) and skip migrations.
+             INSERT INTO schema_version (version) VALUES (1);
+             INSERT INTO schema_version (version) VALUES (3);",
+        )
+        .expect("setup");
+        drop(conn);
+
+        // Should not attempt migrations (which would fail on already-existing columns).
+        AuditReader::open(&db_path).expect("should open cleanly with max version = 3");
     }
 }

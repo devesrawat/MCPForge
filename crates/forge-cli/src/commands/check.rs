@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Args;
-use forge_core::config::{ForgeConfig, SecretRef};
+use forge_core::config::{ForgeConfig, SecretRef, Transport};
 use keyring::Entry;
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -10,6 +10,13 @@ use std::path::PathBuf;
 pub struct Check {
     #[arg(
         long,
+        default_value = "forge.toml",
+        help = "Path to the forge config file"
+    )]
+    pub config: PathBuf,
+
+    #[arg(
+        long,
         help = "Fix common issues automatically. Prompts interactively for each secret value; requires a terminal and is not suitable for CI/non-interactive environments."
     )]
     pub fix: bool,
@@ -17,12 +24,12 @@ pub struct Check {
 
 impl Check {
     pub fn run(&self) -> Result<()> {
-        let config_path = PathBuf::from("forge.toml");
+        let config_path = &self.config;
         if !config_path.exists() {
-            anyhow::bail!("no forge.toml found in current directory");
+            anyhow::bail!("no config file found at {}", config_path.display());
         }
 
-        let mut config = ForgeConfig::load_from_file(&config_path)
+        let mut config = ForgeConfig::load_from_file(config_path)
             .with_context(|| format!("failed to parse config file {}", config_path.display()))?;
 
         println!(
@@ -31,7 +38,7 @@ impl Check {
         );
 
         if self.fix {
-            let fixed = fix_literal_secrets(&mut config, &config_path)?;
+            let fixed = fix_literal_secrets(&mut config, config_path)?;
             if fixed == 0 {
                 println!("Nothing to fix.\n");
             }
@@ -67,17 +74,37 @@ pub fn run_checks(config: &ForgeConfig) -> (usize, usize) {
     for (name, server_config) in &config.server {
         println!("  server.{}:", name);
 
-        // Check if command exists in PATH
-        let parts = server_config.cmd_parts();
-        if parts.is_empty() {
-            println!("    [ERR] empty command");
-            error_count += 1;
-        } else {
-            match which::which(&parts[0]) {
-                Ok(_) => println!("    [OK] command '{}' found in PATH", parts[0]),
-                Err(_) => {
-                    println!("    [ERR] command '{}' not found in PATH", parts[0]);
+        // For HTTP/SSE transports there is no local command — validate the URL instead.
+        if matches!(server_config.transport, Transport::Http | Transport::Sse) {
+            match server_config.url.as_deref() {
+                Some(url) if !url.is_empty() => {
+                    println!("    [OK] url '{}'", url);
+                }
+                _ => {
+                    println!(
+                        "    [ERR] {}/sse server requires a non-empty url",
+                        if matches!(server_config.transport, Transport::Http) {
+                            "http"
+                        } else {
+                            "sse"
+                        }
+                    );
                     error_count += 1;
+                }
+            }
+        } else {
+            // Stdio transport: check that the command exists in PATH.
+            let parts = server_config.cmd_parts();
+            if parts.is_empty() {
+                println!("    [ERR] empty command");
+                error_count += 1;
+            } else {
+                match which::which(&parts[0]) {
+                    Ok(_) => println!("    [OK] command '{}' found in PATH", parts[0]),
+                    Err(_) => {
+                        println!("    [ERR] command '{}' not found in PATH", parts[0]);
+                        error_count += 1;
+                    }
                 }
             }
         }
@@ -346,5 +373,52 @@ cmd = "true"
         .unwrap();
         let (errors, _) = run_checks(&cfg);
         assert_eq!(errors, 0);
+    }
+
+    #[test]
+    fn http_server_with_url_yields_no_cmd_error() {
+        let cfg = ForgeConfig::parse_str(
+            r#"
+[server.remote]
+transport = "http"
+url = "http://127.0.0.1:8080/mcp"
+"#,
+        )
+        .unwrap();
+        let (errors, _) = run_checks(&cfg);
+        assert_eq!(errors, 0, "http server with url should yield no errors");
+    }
+
+    #[test]
+    fn http_server_without_url_yields_error() {
+        // Config parsing itself validates url presence for http, but run_checks
+        // should also catch it if somehow reached.
+        let cfg = ForgeConfig::parse_str(
+            r#"
+[server.remote]
+transport = "http"
+url = "http://127.0.0.1:9999/mcp"
+"#,
+        )
+        .unwrap();
+        // Manually clear url to simulate the edge case.
+        let mut bad = cfg.clone();
+        bad.server.get_mut("remote").unwrap().url = None;
+        let (errors, _) = run_checks(&bad);
+        assert!(errors > 0, "http server missing url should yield an error");
+    }
+
+    #[test]
+    fn sse_server_with_url_yields_no_cmd_error() {
+        let cfg = ForgeConfig::parse_str(
+            r#"
+[server.linear]
+transport = "sse"
+url = "https://mcp.linear.app/sse"
+"#,
+        )
+        .unwrap();
+        let (errors, _) = run_checks(&cfg);
+        assert_eq!(errors, 0, "sse server with url should yield no errors");
     }
 }

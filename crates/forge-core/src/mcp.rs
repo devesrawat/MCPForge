@@ -102,6 +102,23 @@ pub struct RmcpChildTransport {
     client: Mutex<RunningService<RoleClient, ()>>,
 }
 
+fn handshake_error(server_name: &str, cmd: &str, raw: &str) -> anyhow::Error {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("broken pipe") {
+        anyhow!(
+            "server '{server_name}': MCP handshake failed.\n\
+             The command '{cmd}' exited immediately without responding to MCP initialize.\n\
+             Verify the command is a valid MCP server (run it manually to check)."
+        )
+    } else {
+        anyhow!(
+            "server '{server_name}': MCP handshake failed (command: '{cmd}').\n\
+             Verify the command is a valid MCP server and responds to MCP initialize.\n\
+             Details: {raw}"
+        )
+    }
+}
+
 impl RmcpChildTransport {
     pub async fn spawn(server_name: &str, config: &ServerConfig) -> Result<(Self, Option<u32>)> {
         if config.transport != Transport::Stdio {
@@ -151,10 +168,11 @@ impl RmcpChildTransport {
             });
         }
 
+        let cmd_display = config.cmd.as_deref().unwrap_or("(none)");
         let running = ()
             .serve(transport)
             .await
-            .map_err(|e| anyhow!("MCP handshake failed for '{}': {}", server_name, e))?;
+            .map_err(|e| handshake_error(server_name, cmd_display, &e.to_string()))?;
 
         Ok((
             Self {
@@ -215,7 +233,7 @@ impl HttpMcpTransport {
     ) -> Result<Self> {
         let config = StreamableHttpClientTransportConfig::with_uri(url).custom_headers(headers);
         let transport = StreamableHttpClientTransport::from_config(config);
-        let running = ()
+        let running: RunningService<RoleClient, _> = ()
             .serve(transport)
             .await
             .map_err(|e| anyhow!("HTTP MCP handshake failed for '{}': {}", url, e))?;
@@ -339,7 +357,14 @@ impl LegacySseMcpTransport {
                     }
                 }
             }
-            pending_clone.clear();
+            // SSE stream ended — wake every waiting caller with an error so they
+            // don't block until their per-request timeout fires.
+            let keys: Vec<u64> = pending_clone.iter().map(|e| *e.key()).collect();
+            for key in keys {
+                if let Some((_, tx)) = pending_clone.remove(&key) {
+                    let _ = tx.send(Err(anyhow!("SSE connection closed")));
+                }
+            }
         });
 
         Ok(Self {
@@ -352,11 +377,20 @@ impl LegacySseMcpTransport {
         })
     }
 
+    /// Maximum number of in-flight requests for a single SSE connection.
+    const MAX_PENDING: usize = 512;
+
     async fn send_request(
         &self,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        if self.inner.pending.len() >= Self::MAX_PENDING {
+            return Err(anyhow!(
+                "SSE pending request limit ({}) reached",
+                Self::MAX_PENDING
+            ));
+        }
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.inner.pending.insert(id, tx);
@@ -401,6 +435,9 @@ impl McpTransport for LegacySseMcpTransport {
         let resp = self
             .send_request("tools/list", serde_json::json!({}))
             .await?;
+        if let Some(err) = resp.get("error") {
+            return Err(anyhow!("SSE list_tools error: {}", err));
+        }
         let tools = resp["result"]["tools"]
             .as_array()
             .ok_or_else(|| anyhow!("SSE list_tools: missing tools array"))?;
@@ -726,6 +763,31 @@ mod tests {
     }
 
     #[test]
+    fn handshake_error_broken_pipe_gives_actionable_message() {
+        let err = handshake_error(
+            "myserver",
+            "echo",
+            "Send message error Transport [rmcp::transport::child_process::TokioChildProcess] \
+             error: Broken pipe (os error 32), when send initialize request",
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("server 'myserver'"));
+        assert!(msg.contains("'echo'"));
+        assert!(msg.contains("exited immediately"));
+        assert!(msg.contains("valid MCP server"));
+        assert!(!msg.contains("rmcp::"));
+    }
+
+    #[test]
+    fn handshake_error_other_error_includes_details() {
+        let err = handshake_error("srv", "my-cmd", "connection refused");
+        let msg = err.to_string();
+        assert!(msg.contains("server 'srv'"));
+        assert!(msg.contains("'my-cmd'"));
+        assert!(msg.contains("connection refused"));
+    }
+
+    #[test]
     fn test_tool_cache_ttl_from_env_invalid_falls_back_to_60() {
         // SAFETY: test-only env mutation.
         unsafe { std::env::set_var("FORGE_TOOL_CACHE_TTL_SECS", "not_a_number") };
@@ -940,5 +1002,31 @@ url = ""
             "expected exactly 2 transport calls (1 initial + 1 background refresh)"
         );
         assert!(!registry.cache.is_empty());
+    }
+
+    /// A transport whose list_tools always returns an Err, used to verify that
+    /// the ToolRegistry propagates transport errors rather than silently swallowing them.
+    struct AlwaysErrTransport;
+
+    #[async_trait::async_trait]
+    impl McpTransport for AlwaysErrTransport {
+        async fn list_tools(&self) -> Result<Vec<ToolInfo>> {
+            Err(anyhow!("SSE list_tools error: {{\"code\":-32601,\"message\":\"Method not found\"}}"))
+        }
+        async fn call_tool(&self, _name: &str, _args: Value) -> Result<Value> {
+            Err(anyhow!("not implemented"))
+        }
+    }
+
+    #[tokio::test]
+    async fn list_tools_propagates_transport_error() {
+        let mut transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
+        transports.insert("bad".to_string(), Arc::new(AlwaysErrTransport));
+
+        let registry = ToolRegistry::new(transports);
+        let result = registry.list_tools("bad").await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("SSE list_tools error"), "expected error message, got: {msg}");
     }
 }

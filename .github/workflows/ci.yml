@@ -66,3 +66,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --all --locked
+
+      - name: Run forge-proxy tests with test-helpers feature
+        run: cargo test -p forge-proxy --locked --features test-helpers
+
+      - name: Run QA edge-case regression tests
+        run: cargo test -p forge-proxy --test qa_edge_cases --locked --features test-helpers

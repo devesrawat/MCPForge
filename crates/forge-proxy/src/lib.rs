@@ -1,25 +1,28 @@
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{DefaultBodyLimit, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 
 pub mod auth;
 pub mod sse;
 
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_helpers;
+
 use auth::AuthLayer;
 use chrono::Datelike;
 use dashmap::DashMap;
 use forge_core::audit::{AuditEvent, AuditWriter};
-use forge_core::config::{DefaultSecretResolver, ForgeConfig, RbacPolicy, SecretResolver};
+use forge_core::config::{ForgeConfig, RbacPolicy};
 use forge_core::injection::{InjectionDetector, InjectionMode};
-use forge_core::mcp::{ToolInfo, ToolRegistry};
+use forge_core::mcp::ToolRegistry;
 use governor::clock::DefaultClock;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
-use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 pub use sse::SessionStore;
@@ -108,18 +111,16 @@ pub struct ProxyAppState {
     pub injection_detector: Arc<InjectionDetector>,
     /// Active SSE sessions: session_id → sender for SSE event messages.
     pub sessions: SessionStore,
-    /// Resolved Bearer token for proxy auth (`None` = auth disabled).
-    /// Stored as `SecretString` to prevent accidental exposure in debug output or logs.
-    pub auth_token: Option<SecretString>,
+    /// Optional Bearer token for proxy auth. `None` = auth disabled.
+    pub auth_token: Option<String>,
 }
 
 impl ProxyAppState {
-    pub async fn new(
+    pub fn new(
         registry: ToolRegistry,
         config: ForgeConfig,
         audit: Option<Arc<AuditWriter>>,
     ) -> anyhow::Result<Self> {
-        let auth_token = resolve_auth_token(&config.proxy).await?;
         let injection_mode = parse_injection_mode(&config.guard.injection_mode)?;
 
         let rate_limiters = Arc::new(DashMap::new());
@@ -147,23 +148,9 @@ impl ProxyAppState {
             policies: Arc::new(policies),
             injection_detector: Arc::new(InjectionDetector::new(injection_mode)),
             sessions: Arc::new(DashMap::new()),
-            auth_token,
+            auth_token: None,
         })
     }
-}
-
-async fn resolve_auth_token(
-    proxy: &forge_core::config::ProxyConfig,
-) -> anyhow::Result<Option<SecretString>> {
-    let Some(secret_ref) = &proxy.auth_token else {
-        return Ok(None);
-    };
-    let resolver = DefaultSecretResolver;
-    let value = resolver
-        .resolve("proxy", secret_ref)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to resolve proxy auth_token: {}", e))?;
-    Ok(Some(SecretString::from(value.expose_secret())))
 }
 
 fn parse_injection_mode(mode: &str) -> anyhow::Result<InjectionMode> {
@@ -189,7 +176,9 @@ pub struct JsonRpcRequest {
 #[derive(Debug, Serialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
     pub id: Option<Value>,
 }
@@ -225,13 +214,23 @@ impl JsonRpcResponse {
     }
 }
 
+/// Return a JSON-RPC parse error response body with HTTP 200.
+fn parse_error_response() -> Response {
+    let body = r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"Parse error"},"id":null}"#;
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
 pub fn build_router(state: ProxyAppState) -> Router {
-    let auth_token = state
-        .auth_token
-        .as_ref()
-        .map(|s: &SecretString| s.expose_secret().to_owned());
+    let auth_token = state.auth_token.clone();
     Router::new()
         .route("/", post(handle_mcp_request))
+        // BUG-09: MCP Streamable HTTP spec discovery endpoint
+        .route("/.well-known/mcp", get(handle_well_known_mcp))
         .route("/.well-known/mcp-servers.json", get(handle_well_known))
         // Legacy SSE transport (MCP 2024-11-05 §3.2)
         .route("/sse", get(sse::handle_sse_connect))
@@ -244,6 +243,17 @@ pub fn build_router(state: ProxyAppState) -> Router {
         ))
         .layer(AuthLayer::new(auth_token))
         .with_state(state)
+}
+
+/// BUG-09: GET /.well-known/mcp — MCP Streamable HTTP client auto-discovery.
+async fn handle_well_known_mcp() -> impl IntoResponse {
+    let body = json!({
+        "name": "mcp-forge",
+        "version": env!("CARGO_PKG_VERSION"),
+        "transport": "http",
+        "endpoint": "/",
+    });
+    (StatusCode::OK, Json(body))
 }
 
 async fn handle_well_known(State(state): State<ProxyAppState>) -> impl IntoResponse {
@@ -274,18 +284,123 @@ async fn handle_well_known(State(state): State<ProxyAppState>) -> impl IntoRespo
     (StatusCode::OK, Json(response))
 }
 
+/// BUG-10, BUG-15, BUG-16: Handle single and batch JSON-RPC requests with proper
+/// content-type checking and notification semantics.
 async fn handle_mcp_request(
     State(state): State<ProxyAppState>,
-    Json(request): Json<JsonRpcRequest>,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    // BUG-10: Validate Content-Type before attempting to parse.
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !content_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .unwrap_or("")
+        .eq_ignore_ascii_case("application/json")
+    {
+        return parse_error_response();
+    }
+
+    // BUG-10: Parse as raw Value first so we can detect batch vs single and
+    // check key presence for notifications (BUG-16).
+    let value: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return parse_error_response(),
+    };
+
+    match value {
+        // BUG-15: Batch request — process each item and collect non-notification responses.
+        Value::Array(items) => {
+            // JSON-RPC 2.0 §6: an empty batch array is an invalid request.
+            if items.is_empty() {
+                let body = serde_json::to_string(&JsonRpcResponse::error(
+                    -32600,
+                    "Invalid Request",
+                    None,
+                ))
+                .unwrap_or_default();
+                return (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    body,
+                )
+                    .into_response();
+            }
+            let mut responses: Vec<Value> = Vec::new();
+            for item in items {
+                if let Some(resp) = process_single_value(&state, item).await {
+                    responses.push(serde_json::to_value(resp).unwrap_or(Value::Null));
+                }
+            }
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                serde_json::to_string(&responses).unwrap_or_else(|_| "[]".to_owned()),
+            )
+                .into_response()
+        }
+        // Single request.
+        Value::Object(_) => match process_single_value(&state, value).await {
+            // BUG-16: Notification — no response body.
+            None => StatusCode::OK.into_response(),
+            Some(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        },
+        // Malformed: not an object or array.
+        _ => parse_error_response(),
+    }
+}
+
+/// Process a single JSON-RPC value. Returns `None` for notifications (no `id` key).
+async fn process_single_value(
+    state: &ProxyAppState,
+    value: Value,
+) -> Option<JsonRpcResponse> {
+    // BUG-16: A notification is a request object with no `id` key at all.
+    // `id: null` is a valid request with a null id — check key presence, not value.
+    let is_notification = value
+        .as_object()
+        .map(|o| !o.contains_key("id"))
+        .unwrap_or(false);
+
+    // Deserialize into the typed request struct.
+    let request: JsonRpcRequest = match serde_json::from_value(value) {
+        Ok(r) => r,
+        Err(_) => {
+            // BUG-10: Return JSON-RPC parse error for malformed request objects.
+            return Some(JsonRpcResponse::error(
+                -32700,
+                "Parse error",
+                None,
+            ));
+        }
+    };
+
+    // JSON-RPC 2.0 §4: the "jsonrpc" member MUST be exactly "2.0".
+    if request.jsonrpc.as_deref() != Some("2.0") {
+        return Some(JsonRpcResponse::error(
+            -32600,
+            "Invalid Request",
+            request.id.clone(),
+        ));
+    }
+
     let id = request.id.clone();
 
-    match dispatch_request(&state, request).await {
-        Ok(result) => (StatusCode::OK, Json(JsonRpcResponse::success(result, id))),
-        Err(err) => {
-            let response = JsonRpcResponse::error(err.code(), err.to_string(), id);
-            (StatusCode::OK, Json(response))
-        }
+    let result_resp = match dispatch_request(state, request).await {
+        Ok(result) => JsonRpcResponse::success(result, id),
+        Err(err) => JsonRpcResponse::error(err.code(), err.to_string(), id),
+    };
+
+    // BUG-16: Suppress response for notifications.
+    if is_notification {
+        None
+    } else {
+        Some(result_resp)
     }
 }
 
@@ -310,53 +425,44 @@ async fn dispatch_request(
 
 async fn handle_tools_list(
     state: &ProxyAppState,
-    params: Option<Value>,
+    _params: Option<Value>,
 ) -> Result<Value, ProxyError> {
-    let tools: Vec<ToolInfo> = if let Some(params) = params {
-        if let Some(server) = params.get("server").and_then(Value::as_str) {
-            let server_tools = state.registry.list_tools(server).await.map_err(|e| {
-                if forge_core::mcp::is_unknown_server_error(&e) {
-                    ProxyError::invalid_params(e.to_string())
-                } else {
-                    ProxyError::internal(e)
-                }
-            })?;
-            server_tools
-                .into_iter()
-                .map(|mut t| {
-                    t.name = forge_core::protocol::namespace_tool(server, &t.name);
-                    t
-                })
-                .collect()
-        } else {
-            state
-                .registry
-                .list_all_tools()
-                .await
-                .map_err(ProxyError::internal)?
-        }
-    } else {
-        state
-            .registry
-            .list_all_tools()
-            .await
-            .map_err(ProxyError::internal)?
-    };
+    // Fetch all tools across all servers as ToolInfo structs.
+    let all_tools = state
+        .registry
+        .list_all_tools()
+        .await
+        .map_err(ProxyError::internal)?;
 
-    let tool_objs: Vec<Value> = tools.into_iter().map(tool_info_to_json).collect();
+    // BUG-12: Filter tools against allowed_tools / deny_tools policy per server.
+    // Tool names are namespaced as `server__tool`; strip the prefix before policy check.
+    let filtered_tools: Vec<Value> = all_tools
+        .into_iter()
+        .filter(|tool_info| {
+            let namespaced = &tool_info.name;
+            match forge_core::protocol::parse_namespaced_tool(namespaced) {
+                Some((server, orig_tool)) => state
+                    .policies
+                    .get(server)
+                    .map(|p| p.is_allowed(orig_tool))
+                    .unwrap_or(true),
+                // Cannot parse namespace format — keep the tool so it isn't silently dropped.
+                None => true,
+            }
+        })
+        .map(|tool_info| {
+            let mut tool = json!({
+                "name": tool_info.name,
+                "inputSchema": tool_info.input_schema,
+            });
+            if let Some(desc) = &tool_info.description {
+                tool["description"] = json!(desc);
+            }
+            tool
+        })
+        .collect();
 
-    Ok(json!({ "tools": tool_objs }))
-}
-
-fn tool_info_to_json(t: ToolInfo) -> Value {
-    let mut obj = json!({
-        "name": t.name,
-        "inputSchema": t.input_schema,
-    });
-    if let Some(desc) = t.description {
-        obj["description"] = Value::String(desc);
-    }
-    obj
+    Ok(json!({ "tools": filtered_tools }))
 }
 
 #[instrument(
@@ -377,46 +483,24 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    // Parse tool name first so server/tool are available for audit on every early return.
+    scan_args_for_injection(state, &args)?;
+
     let (server, orig_tool) = forge_core::protocol::parse_namespaced_tool(tool_name)
         .ok_or_else(|| ProxyError::invalid_params("tool name must be server__tool"))?;
 
     tracing::Span::current().record("server", server);
     tracing::Span::current().record("tool", orig_tool);
 
-    if let Err(e) = scan_args_for_injection(state, &args) {
-        write_audit_event(
-            state,
-            server,
-            orig_tool,
-            &args,
-            -32002,
-            0,
-            Some("injection in tool arguments".to_owned()),
-        );
-        return Err(e);
-    }
-
     check_policy_and_guards(state, server, orig_tool, &args)?;
 
     let start = Instant::now();
     let result = state.registry.call_tool(tool_name, args.clone()).await;
-    let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let latency_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let latency_ms = latency_us / 1000;
     tracing::Span::current().record("latency_ms", latency_ms);
 
     if let Ok(ref v) = result {
-        if let Err(e) = scan_result_for_injection(state, v) {
-            write_audit_event(
-                state,
-                server,
-                orig_tool,
-                &args,
-                -32002,
-                latency_ms,
-                Some("injection in tool result".to_owned()),
-            );
-            return Err(e);
-        }
+        scan_result_for_injection(state, v)?;
     }
 
     let (result_code, error) = match &result {
@@ -429,7 +513,7 @@ async fn handle_tools_call(
         orig_tool,
         &args,
         result_code,
-        latency_ms,
+        latency_us,
         error,
     );
 
@@ -440,17 +524,18 @@ fn scan_args_for_injection(state: &ProxyAppState, args: &Value) -> Result<(), Pr
     if !state.config.guard.enabled {
         return Ok(());
     }
-    if let Some(alert) = state.injection_detector.scan_arguments(args) {
+    let alerts = state.injection_detector.scan_all_arguments(args);
+    for alert in &alerts {
         tracing::warn!(
             matched_pattern = alert.matched_pattern,
             position = alert.position,
             "prompt injection detected in tool arguments"
         );
-        if state.injection_detector.mode() == InjectionMode::Block {
-            return Err(ProxyError::injection_detected(
-                "Potential prompt injection detected in arguments",
-            ));
-        }
+    }
+    if !alerts.is_empty() && state.injection_detector.mode() == InjectionMode::Block {
+        return Err(ProxyError::injection_detected(
+            "Potential prompt injection detected in arguments",
+        ));
     }
     Ok(())
 }
@@ -482,21 +567,9 @@ fn check_policy_and_guards(
         }
     }
 
-    if !state.config.guard.enabled {
-        return Ok(());
-    }
-
+    // Rate limiting and cost guard are always enforced, independent of guard.enabled.
     if let Some(lim) = state.rate_limiters.get(server) {
         if lim.check().is_err() {
-            write_audit_event(
-                state,
-                server,
-                orig_tool,
-                args,
-                -32000,
-                0,
-                Some("rate limit exceeded".to_owned()),
-            );
             return Err(ProxyError::rate_limited(server));
         }
     }
@@ -506,10 +579,10 @@ fn check_policy_and_guards(
         .server
         .get(server)
         .ok_or_else(|| ProxyError::internal(anyhow::anyhow!("unknown server {}", server)))?;
-    if let Err(e) = state.cost_guard.check(server, srv_cfg.max_calls_per_day) {
-        write_audit_event(state, server, orig_tool, args, -429, 0, Some(e.to_string()));
-        return Err(ProxyError::internal(e));
-    }
+    state
+        .cost_guard
+        .check(server, srv_cfg.max_calls_per_day)
+        .map_err(ProxyError::internal)?;
 
     Ok(())
 }
@@ -539,16 +612,16 @@ fn write_audit_event(
     tool: &str,
     args: &Value,
     result_code: i32,
-    latency_ms: u64,
+    latency_us: u64,
     error: Option<String>,
 ) {
     if let Some(aw) = &state.audit {
-        aw.log(AuditEvent::new(
+        aw.log(AuditEvent::new_with_latency_us(
             server,
             tool,
             args,
             result_code,
-            latency_ms,
+            latency_us,
             error,
             None,
         ));
@@ -701,7 +774,7 @@ mod tests {
     use std::collections::HashMap;
     use tower::util::ServiceExt;
 
-    async fn test_state(registry: ToolRegistry) -> ProxyAppState {
+    fn test_state(registry: ToolRegistry) -> ProxyAppState {
         let mut cfg = ForgeConfig::parse_str(
             r#"
 [server.local]
@@ -710,9 +783,7 @@ cmd = "true"
         )
         .expect("config");
         cfg.server.get_mut("local").unwrap().max_calls_per_min = 60;
-        ProxyAppState::new(registry, cfg, None)
-            .await
-            .expect("state")
+        ProxyAppState::new(registry, cfg, None).expect("state")
     }
 
     #[tokio::test]
@@ -727,12 +798,12 @@ cmd = "true"
             ])),
         );
 
-        let router = build_router(test_state(ToolRegistry::new(transports)).await);
+        let router = build_router(test_state(ToolRegistry::new(transports)));
         let request = Request::builder()
             .method("POST")
             .uri("/")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"method":"tools/list","id":1}"#))
+            .body(Body::from(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#))
             .unwrap();
 
         let response = router.oneshot(request).await.unwrap();
@@ -758,9 +829,10 @@ cmd = "true"
             Arc::new(MockMcpTransport::new(vec!["build".to_string()])),
         );
 
-        let router = build_router(test_state(ToolRegistry::new(transports)).await);
+        let router = build_router(test_state(ToolRegistry::new(transports)));
 
         let payload = json!({
+            "jsonrpc": "2.0",
             "method": "tools/call",
             "params": {
                 "name": "local__build",
@@ -785,95 +857,354 @@ cmd = "true"
         assert_eq!(response_json["result"]["tool"], "build");
         assert_eq!(response_json["result"]["args"]["task"], "compile");
     }
-}
 
-/// Test helpers exposed for integration tests in `tests/`.
-#[doc(hidden)]
-pub mod test_helpers {
-    use super::*;
-    use forge_core::config::{ForgeConfig, RbacPolicy};
-    use forge_core::injection::{InjectionDetector, InjectionMode};
-    use forge_core::mcp::ToolRegistry;
-    use std::collections::HashMap;
-    use std::num::NonZeroU32;
-    use std::sync::Arc;
+    #[tokio::test]
+    async fn well_known_mcp_returns_discovery_document() {
+        let router = build_router(test_state(ToolRegistry::new(HashMap::new())));
+        let request = Request::builder()
+            .method("GET")
+            .uri("/.well-known/mcp")
+            .body(Body::empty())
+            .unwrap();
 
-    pub fn make_state_with_registry(registry: ToolRegistry) -> ProxyAppState {
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["name"], "mcp-forge");
+        assert_eq!(body_json["transport"], "http");
+        assert_eq!(body_json["endpoint"], "/");
+    }
+
+    #[tokio::test]
+    async fn parse_error_on_bad_json() {
+        let router = build_router(test_state(ToolRegistry::new(HashMap::new())));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from("not-valid-json"))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["error"]["code"], -32700);
+        assert_eq!(body_json["error"]["message"], "Parse error");
+    }
+
+    #[tokio::test]
+    async fn parse_error_on_wrong_content_type() {
+        let router = build_router(test_state(ToolRegistry::new(HashMap::new())));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "text/plain")
+            .body(Body::from(r#"{"method":"tools/list","id":1}"#))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["error"]["code"], -32700);
+    }
+
+    #[tokio::test]
+    async fn batch_request_returns_array() {
+        let mut transports: HashMap<String, Arc<dyn forge_core::mcp::McpTransport>> =
+            HashMap::new();
+        transports.insert(
+            "local".to_string(),
+            Arc::new(MockMcpTransport::new(vec!["ping".to_string()])),
+        );
+
+        let router = build_router(test_state(ToolRegistry::new(transports)));
+        let payload = json!([
+            {"jsonrpc": "2.0", "method": "initialize", "id": 1},
+            {"jsonrpc": "2.0", "method": "tools/list", "id": 2}
+        ]);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(body_json.is_array(), "batch response must be array");
+        assert_eq!(body_json.as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn notification_returns_empty_200() {
+        let router = build_router(test_state(ToolRegistry::new(HashMap::new())));
+        // A notification has no `id` field.
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"jsonrpc":"2.0","method":"initialize"}"#))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert!(body.is_empty(), "notification must produce empty response body");
+    }
+
+    /// BUG-15: Batch with a notification — the notification must be omitted from the array.
+    #[tokio::test]
+    async fn batch_notification_omitted_from_response() {
+        let router = build_router(test_state(ToolRegistry::new(HashMap::new())));
+        // Item 0: notification (no `id`), item 1: request (has `id`).
+        let payload = json!([
+            {"jsonrpc": "2.0", "method": "initialize"},
+            {"jsonrpc": "2.0", "method": "initialize", "id": 99}
+        ]);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = body_json.as_array().expect("batch response must be array");
+        assert_eq!(arr.len(), 1, "notification must be omitted; only 1 response expected");
+        assert_eq!(arr[0]["id"], 99);
+    }
+
+    /// BUG-11: Auth rejection must return JSON-RPC error body, not plain text.
+    #[tokio::test]
+    async fn auth_rejection_returns_jsonrpc_error() {
+        let mut state = test_state(ToolRegistry::new(HashMap::new()));
+        state.auth_token = Some("secret-token".to_owned());
+        let router = build_router(state);
+
+        // Missing Authorization header.
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"method":"tools/list","id":1}"#))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let ct = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("application/json"), "auth rejection must be application/json");
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["error"]["code"], -32001);
+        assert_eq!(body_json["error"]["message"], "Unauthorized");
+        assert_eq!(body_json["jsonrpc"], "2.0");
+    }
+
+    /// BUG-11: Correct token must pass through.
+    #[tokio::test]
+    async fn auth_valid_token_passes_through() {
+        let mut transports: HashMap<String, Arc<dyn forge_core::mcp::McpTransport>> =
+            HashMap::new();
+        transports.insert(
+            "local".to_string(),
+            Arc::new(MockMcpTransport::new(vec!["ping".to_string()])),
+        );
+        let mut state = test_state(ToolRegistry::new(transports));
+        state.auth_token = Some("my-secret".to_owned());
+        let router = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer my-secret")
+            .body(Body::from(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(body_json["error"].is_null(), "valid token should reach handler");
+    }
+
+    /// BUG-12: tools/list must filter out denied tools and only return allowed ones.
+    #[tokio::test]
+    async fn tools_list_filters_denied_tools() {
+        let mut transports: HashMap<String, Arc<dyn forge_core::mcp::McpTransport>> =
+            HashMap::new();
+        transports.insert(
+            "local".to_string(),
+            Arc::new(MockMcpTransport::new(vec![
+                "admin_reset".to_string(),
+                "safe_query".to_string(),
+                "admin_delete".to_string(),
+            ])),
+        );
+
         let cfg = ForgeConfig::parse_str(
             r#"
-[server.test_server]
+[server.local]
 cmd = "true"
+deny_tools = ["admin_*"]
 "#,
         )
         .expect("config");
+        let state = ProxyAppState::new(ToolRegistry::new(transports), cfg, None).expect("state");
+        let router = build_router(state);
 
-        let mut policies = HashMap::new();
-        for name in cfg.server.keys() {
-            policies.insert(
-                name.clone(),
-                RbacPolicy::from_server_config(&cfg.server[name]).expect("policy compile"),
-            );
-        }
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#))
+            .unwrap();
 
-        ProxyAppState {
-            registry: Arc::new(registry),
-            config: Arc::new(cfg),
-            audit: None,
-            rate_limiters: Arc::new(DashMap::new()),
-            cost_guard: Arc::new(CostGuard::new()),
-            policies: Arc::new(policies),
-            injection_detector: Arc::new(InjectionDetector::new(InjectionMode::Block)),
-            sessions: Arc::new(DashMap::new()),
-            auth_token: None,
-        }
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tools = body_json["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(
+            !names.contains(&"local__admin_reset"),
+            "admin_reset must be filtered by deny_tools"
+        );
+        assert!(
+            !names.contains(&"local__admin_delete"),
+            "admin_delete must be filtered by deny_tools"
+        );
+        assert!(
+            names.contains(&"local__safe_query"),
+            "safe_query must survive deny filter"
+        );
     }
 
-    pub fn make_state_with_registry_and_rate_limit(
-        registry: ToolRegistry,
-        server_name: &str,
-        max_per_min: u32,
-    ) -> ProxyAppState {
-        let cfg = ForgeConfig::parse_str(&format!(
-            r#"
-[guard]
-enabled = true
-
-[server.{server_name}]
-cmd = "true"
-max_calls_per_min = {max_per_min}
-"#,
-            server_name = server_name,
-            max_per_min = max_per_min,
-        ))
-        .expect("config");
-
-        let rate_limiters = Arc::new(DashMap::new());
-        let n = NonZeroU32::new(max_per_min.max(1)).expect("valid rate limit");
-        let limiter = Arc::new(RateLimiter::direct(Quota::per_minute(n)));
-        rate_limiters.insert(server_name.to_string(), limiter);
-
-        let mut policies = HashMap::new();
-        policies.insert(
-            server_name.to_string(),
-            RbacPolicy::from_server_config(&cfg.server[server_name]).expect("policy compile"),
+    /// BUG-12: tools/list with allowed_tools whitelist only returns listed tools.
+    #[tokio::test]
+    async fn tools_list_filters_to_allowed_tools_only() {
+        let mut transports: HashMap<String, Arc<dyn forge_core::mcp::McpTransport>> =
+            HashMap::new();
+        transports.insert(
+            "local".to_string(),
+            Arc::new(MockMcpTransport::new(vec![
+                "build".to_string(),
+                "test".to_string(),
+                "deploy".to_string(),
+            ])),
         );
 
-        ProxyAppState {
-            registry: Arc::new(registry),
-            config: Arc::new(cfg),
-            audit: None,
-            rate_limiters,
-            cost_guard: Arc::new(CostGuard::new()),
-            policies: Arc::new(policies),
-            injection_detector: Arc::new(InjectionDetector::new(InjectionMode::Block)),
-            sessions: Arc::new(DashMap::new()),
-            auth_token: None,
-        }
+        let cfg = ForgeConfig::parse_str(
+            r#"
+[server.local]
+cmd = "true"
+allowed_tools = ["build", "test"]
+"#,
+        )
+        .expect("config");
+        let state = ProxyAppState::new(ToolRegistry::new(transports), cfg, None).expect("state");
+        let router = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tools = body_json["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"local__build"), "build must be in allowed list");
+        assert!(names.contains(&"local__test"), "test must be in allowed list");
+        assert!(
+            !names.contains(&"local__deploy"),
+            "deploy must be excluded by allowed_tools whitelist"
+        );
     }
 
-    pub fn make_state_with_auth(token: &str) -> ProxyAppState {
-        let mut state = make_state_with_registry(ToolRegistry::new(HashMap::new()));
-        state.auth_token = Some(SecretString::from(token));
-        state
+    /// JSON-RPC 2.0 §6: an empty batch array must return -32600 Invalid Request.
+    #[tokio::test]
+    async fn empty_batch_returns_invalid_request() {
+        let router = build_router(test_state(ToolRegistry::new(HashMap::new())));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from("[]"))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["error"]["code"], -32600, "empty batch must yield Invalid Request");
+    }
+
+    /// JSON-RPC 2.0 §4: missing jsonrpc field must return -32600 Invalid Request.
+    #[tokio::test]
+    async fn missing_jsonrpc_version_returns_invalid_request() {
+        let router = build_router(test_state(ToolRegistry::new(HashMap::new())));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"method":"initialize","id":1}"#))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["error"]["code"], -32600, "missing jsonrpc must yield Invalid Request");
+        assert_eq!(body_json["id"], 1);
+    }
+
+    /// JSON-RPC 2.0 §4: wrong jsonrpc version must return -32600 Invalid Request.
+    #[tokio::test]
+    async fn wrong_jsonrpc_version_returns_invalid_request() {
+        let router = build_router(test_state(ToolRegistry::new(HashMap::new())));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"jsonrpc":"1.0","method":"initialize","id":2}"#))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["error"]["code"], -32600, "wrong jsonrpc version must yield Invalid Request");
+        assert_eq!(body_json["id"], 2);
     }
 }

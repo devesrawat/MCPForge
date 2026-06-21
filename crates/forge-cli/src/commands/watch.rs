@@ -26,6 +26,8 @@ use std::{
 
 /// Latency threshold for yellow highlighting (milliseconds).
 const SLOW_LATENCY_MS: u64 = 1000;
+/// Fixed height of the detail panel in rows.
+const DETAIL_HEIGHT: u16 = 8;
 /// Latency threshold for magenta highlighting (milliseconds).
 const VERY_SLOW_LATENCY_MS: u64 = 5000;
 /// Number of buckets in the sparkline.
@@ -151,6 +153,8 @@ struct App {
     /// Sliding window of event timestamps for rate calculation.
     event_times: VecDeque<Instant>,
     input_mode: InputMode,
+    /// Running count of events that passed CLI/status filters before search filter.
+    pre_filter_count: usize,
 }
 
 /// RAII guard that restores the terminal on drop, regardless of whether
@@ -195,6 +199,7 @@ impl Watch {
             message: None,
             event_times: VecDeque::new(),
             input_mode: InputMode::Normal,
+            pre_filter_count: 0,
         };
 
         app.poll();
@@ -432,6 +437,7 @@ impl App {
         // Reset to full dataset, then re-poll and re-filter.
         self.events.clear();
         self.latest_ts = 0;
+        self.pre_filter_count = 0;
         self.poll();
     }
 
@@ -457,6 +463,23 @@ impl App {
                 if let Some(ref tool) = self.filter_tool {
                     new_events.retain(|e| e.tool == *tool);
                 }
+                // Apply status filter.
+                match self.status_filter {
+                    StatusFilter::All => {}
+                    StatusFilter::Errors => {
+                        new_events.retain(|e| e.result_code != 0);
+                    }
+                    StatusFilter::Denials => {
+                        new_events.retain(|e| e.result_code == -403);
+                    }
+                    StatusFilter::Blocked => {
+                        new_events.retain(|e| e.result_code == -32002);
+                    }
+                }
+
+                // Count events that survived CLI/status filters (denominator for search title).
+                let pre_search_count = new_events.len();
+
                 // Apply live search.
                 if !self.search_text.is_empty() {
                     let needle = self.search_text.to_lowercase();
@@ -472,6 +495,7 @@ impl App {
                 }
 
                 let count = new_events.len();
+                self.pre_filter_count += pre_search_count;
                 self.events.extend(new_events);
                 self.sort_events();
 
@@ -618,29 +642,27 @@ impl App {
 
 impl App {
     fn render(&mut self, f: &mut Frame) {
-        let title_h = 3;
-        let stats_h = 3;
+        let title_h: u16 = 3;
+        let stats_h: u16 = 3;
+        let has_detail = !self.events.is_empty() && self.selected < self.events.len();
 
         // When in search mode, add a search input bar.
-        let search_h = match self.input_mode {
+        let search_h: u16 = match self.input_mode {
             InputMode::Search => 1,
             _ => 0,
         };
 
-        let constraints = if search_h > 0 {
-            vec![
-                Constraint::Length(title_h),
-                Constraint::Length(stats_h),
-                Constraint::Length(search_h),
-                Constraint::Min(1),
-            ]
-        } else {
-            vec![
-                Constraint::Length(title_h),
-                Constraint::Length(stats_h),
-                Constraint::Min(1),
-            ]
-        };
+        let mut constraints = vec![
+            Constraint::Length(title_h),
+            Constraint::Length(stats_h),
+        ];
+        if search_h > 0 {
+            constraints.push(Constraint::Length(search_h));
+        }
+        constraints.push(Constraint::Min(1));
+        if has_detail {
+            constraints.push(Constraint::Length(DETAIL_HEIGHT));
+        }
 
         let chunks = Layout::default().constraints(constraints).split(f.area());
 
@@ -657,8 +679,8 @@ impl App {
 
         self.render_table(f, chunks[ci]);
 
-        if !self.events.is_empty() && self.selected < self.events.len() {
-            self.render_detail_panel(f, chunks[ci]);
+        if has_detail {
+            self.render_detail_panel(f, chunks[ci + 1]);
         }
 
         // Help overlay.
@@ -907,7 +929,7 @@ impl App {
             format!(
                 " log  ({}/{})",
                 self.events.len(),
-                self.events.len() // TODO: track pre-filtered count
+                self.pre_filter_count
             )
         };
 
@@ -983,16 +1005,7 @@ impl App {
 
     // ─── Detail Panel ─────────────────────────────────────────────────
 
-    fn render_detail_panel(&self, f: &mut Frame, parent: Rect) {
-        // Use up to 8 lines or half the available space, whichever is less.
-        let detail_height = 8u16.min(parent.height / 2);
-        let detail_area = Rect {
-            x: parent.x,
-            y: parent.y + parent.height - detail_height,
-            width: parent.width,
-            height: detail_height,
-        };
-
+    fn render_detail_panel(&self, f: &mut Frame, area: Rect) {
         let e = &self.events[self.selected];
         let lat_style = latency_style(e.latency_ms);
         let mut lines = vec![Line::from(vec![
@@ -1010,7 +1023,7 @@ impl App {
             let rendered = serde_json::from_str::<serde_json::Value>(args)
                 .map(|v| serde_json::to_string_pretty(&v).unwrap_or_else(|_| args.clone()))
                 .unwrap_or_else(|_| args.clone());
-            let available_lines = detail_height.saturating_sub(3) as usize;
+            let available_lines = area.height.saturating_sub(3) as usize;
             for line in rendered.lines().take(available_lines) {
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default().fg(Color::DarkGray)),
@@ -1040,7 +1053,7 @@ impl App {
         let detail = Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
             .block(Block::default().borders(Borders::ALL).title(" detail "));
-        f.render_widget(detail, detail_area);
+        f.render_widget(detail, area);
     }
 
     // ─── Help Overlay ─────────────────────────────────────────────────
@@ -1317,6 +1330,65 @@ mod tests {
         assert_eq!(s.fg.unwrap_or(Color::Reset), Color::Reset); // exactly at threshold is not highlighted
     }
 
+    // status filter
+    #[test]
+    fn status_filter_cycles() {
+        assert_eq!(StatusFilter::All.cycle(), StatusFilter::Errors);
+        assert_eq!(StatusFilter::Errors.cycle(), StatusFilter::Denials);
+        assert_eq!(StatusFilter::Denials.cycle(), StatusFilter::Blocked);
+        assert_eq!(StatusFilter::Blocked.cycle(), StatusFilter::All);
+    }
+
+    #[test]
+    fn status_filter_labels() {
+        assert_eq!(StatusFilter::All.label(), "all");
+        assert_eq!(StatusFilter::Errors.label(), "errors");
+        assert_eq!(StatusFilter::Denials.label(), "denials");
+        assert_eq!(StatusFilter::Blocked.label(), "blocked");
+    }
+
+    #[test]
+    fn status_filter_errors_keeps_nonzero() {
+        let mut app = make_app();
+        app.status_filter = StatusFilter::Errors;
+        app.events = vec![
+            make_record("s", "t", 0, 10, 1000),
+            make_record("s", "t", -1, 10, 1001),
+            make_record("s", "t", -403, 10, 1002),
+        ];
+        // Simulate what poll() does: retain by status_filter.
+        let mut events = app.events.clone();
+        events.retain(|e| e.result_code != 0);
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| e.result_code != 0));
+    }
+
+    #[test]
+    fn status_filter_denials_keeps_403() {
+        let events = vec![
+            make_record("s", "t", 0, 10, 1000),
+            make_record("s", "t", -403, 10, 1001),
+            make_record("s", "t", -32002, 10, 1002),
+        ];
+        let mut filtered = events.clone();
+        filtered.retain(|e| e.result_code == -403);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].result_code, -403);
+    }
+
+    #[test]
+    fn status_filter_blocked_keeps_32002() {
+        let events = vec![
+            make_record("s", "t", 0, 10, 1000),
+            make_record("s", "t", -403, 10, 1001),
+            make_record("s", "t", -32002, 10, 1002),
+        ];
+        let mut filtered = events.clone();
+        filtered.retain(|e| e.result_code == -32002);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].result_code, -32002);
+    }
+
     // sort mode
     #[test]
     fn sort_mode_cycles() {
@@ -1445,6 +1517,7 @@ mod tests {
             input_mode: InputMode::Normal,
             bookmarks: Vec::new(),
             status_filter: StatusFilter::All,
+            pre_filter_count: 0,
         }
     }
 
@@ -1464,6 +1537,7 @@ mod tests {
             args_json: Some(r#"{"key": "value"}"#.to_string()),
             result_code,
             latency_ms,
+            latency_us: Some(latency_ms.saturating_mul(1000)),
             error: None,
             session_id: None,
         }

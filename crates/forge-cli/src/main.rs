@@ -5,12 +5,14 @@ mod commands;
 #[cfg(feature = "otlp")]
 mod telemetry;
 use commands::{
-    Add, Audit, Check, Init, Logs, Ls, Remove, Report, Restart, Secret, Start, Status, Stop, Watch,
+    Add, Audit, Check, Init, Logs, Ls, Remove, Report, Restart, Secret, Start, Status, Stop,
+    Watch,
 };
 
 #[derive(Debug, Parser)]
 #[command(name = "forge")]
 #[command(about = "mcp-forge CLI", long_about = None)]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

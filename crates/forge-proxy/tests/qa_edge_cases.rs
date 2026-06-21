@@ -164,7 +164,6 @@ mod schema_edge {
             ForgeConfig::parse_str("[server.srv]\ncmd = \"true\"\n").unwrap(),
             None,
         )
-        .await
         .unwrap();
         build_router(state)
     }
@@ -268,7 +267,6 @@ cmd = "true"
             .unwrap(),
             None,
         )
-        .await
         .unwrap();
         let app = build_router(state);
         let (_, resp) = post_json(
@@ -318,14 +316,15 @@ mod auth_edge {
             ForgeConfig::parse_str("[server.t]\ncmd = \"true\"\n").unwrap(),
             None,
         )
-        .await
         .unwrap();
         state.auth_token = Some(token.to_string().into());
         build_router(state)
     }
 
+    /// RFC 7235 §1.2: auth scheme names are case-insensitive.
+    /// "bearer" and "BEARER" are equivalent to "Bearer".
     #[tokio::test]
-    async fn lowercase_bearer_prefix_rejected() {
+    async fn lowercase_bearer_prefix_accepted() {
         let app = authed_app("secret").await;
         let req = Request::builder()
             .method("POST")
@@ -337,7 +336,23 @@ mod auth_edge {
             ))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn uppercase_bearer_prefix_accepted() {
+        let app = authed_app("secret").await;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .header("Authorization", "BEARER secret")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -441,10 +456,10 @@ mod auth_edge {
             ForgeConfig::parse_str("[server.t]\ncmd = \"true\"\n").unwrap(),
             None,
         )
-        .await
         .unwrap();
         let app = build_router(state);
 
+        // tools/list ignores unknown server filter params and returns all tools.
         let (_, resp) = post_json(
             app,
             "/",
@@ -453,8 +468,12 @@ mod auth_edge {
             None,
         )
         .await;
-        assert!(!resp["error"].is_null());
-        assert_eq!(resp["error"]["code"], -32602);
+        assert!(
+            resp["error"].is_null(),
+            "tools/list ignores unknown server param: {:?}",
+            resp
+        );
+        assert!(resp["result"]["tools"].is_array());
     }
 
     #[tokio::test]
@@ -616,7 +635,7 @@ url = "{url}"
         .unwrap();
 
         let registry = forge_core::mcp::build_tool_registry(&cfg).await.unwrap();
-        let state = ProxyAppState::new(registry, cfg, None).await.unwrap();
+        let state = ProxyAppState::new(registry, cfg, None).unwrap();
         let app = build_router(state);
 
         let (_, resp) = post_json(
@@ -822,7 +841,7 @@ url = "{url}"
         ))
         .unwrap();
         let registry = forge_core::mcp::build_tool_registry(&cfg).await.unwrap();
-        let state = ProxyAppState::new(registry, cfg, None).await.unwrap();
+        let state = ProxyAppState::new(registry, cfg, None).unwrap();
         let app = build_router(state);
         let (_, resp) = post_json(
             app,

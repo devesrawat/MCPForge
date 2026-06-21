@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use clap::{Args, ValueEnum};
-use forge_core::audit::{AuditQuery, AuditReader};
+use forge_core::audit::{AuditQuery, AuditReader, format_latency, latency_ms_f64};
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum OutputFormat {
@@ -59,7 +59,7 @@ impl Audit {
             let avg_lat = if calls == 0 {
                 0.0
             } else {
-                rows.iter().map(|r| r.latency_ms as f64).sum::<f64>() / calls as f64
+                rows.iter().map(latency_ms_f64).sum::<f64>() / calls as f64
             };
             match self.format {
                 OutputFormat::Json => {
@@ -70,7 +70,7 @@ impl Audit {
                 }
                 OutputFormat::Text => {
                     println!(
-                        "audit stats: calls={} errors={} avg_latency_ms={:.1}",
+                        "audit stats: calls={} errors={} avg_latency_ms={:.2}",
                         calls, errors, avg_lat
                     );
                 }
@@ -87,13 +87,14 @@ impl Audit {
                     println!("no audit events found");
                 }
                 for record in rows {
+                    let lat_display = format_latency(&record);
                     println!(
-                        "{} | {} | {} | rc={} | lat={}ms | error={:?} | session={:?}",
+                        "{} | {} | {} | rc={} | lat={} | error={:?} | session={:?}",
                         format_timestamp(record.ts),
                         record.server,
                         record.tool,
                         record.result_code,
-                        record.latency_ms,
+                        lat_display,
                         record.error,
                         record.session_id,
                     );
@@ -109,15 +110,39 @@ fn parse_since(text: &str) -> Result<DateTime<Utc>> {
     let now = Utc::now();
     if let Some(value) = text.strip_suffix('s') {
         let seconds: i64 = value.parse()?;
+        if seconds <= 0 {
+            return Err(anyhow::anyhow!(
+                "duration must be positive, got: {}",
+                text
+            ));
+        }
         Ok(now - Duration::seconds(seconds))
     } else if let Some(value) = text.strip_suffix('m') {
         let minutes: i64 = value.parse()?;
+        if minutes <= 0 {
+            return Err(anyhow::anyhow!(
+                "duration must be positive, got: {}",
+                text
+            ));
+        }
         Ok(now - Duration::minutes(minutes))
     } else if let Some(value) = text.strip_suffix('h') {
         let hours: i64 = value.parse()?;
+        if hours <= 0 {
+            return Err(anyhow::anyhow!(
+                "duration must be positive, got: {}",
+                text
+            ));
+        }
         Ok(now - Duration::hours(hours))
     } else if let Some(value) = text.strip_suffix('d') {
         let days: i64 = value.parse()?;
+        if days <= 0 {
+            return Err(anyhow::anyhow!(
+                "duration must be positive, got: {}",
+                text
+            ));
+        }
         Ok(now - Duration::days(days))
     } else {
         Err(anyhow::anyhow!("unsupported since format: {}", text))
