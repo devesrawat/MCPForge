@@ -29,3 +29,8 @@ lcov.info
 tarpaulin-report.html
 coverage/
 PLAN.md
+
+# Generated / session documentation — do not commit
+VALIDATION_REPORT.md
+docs/QA_BUG_REPORT.md
+docs/superpowers/
