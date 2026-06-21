@@ -1235,4 +1235,3 @@ allowed_tools = ["build", "test"]
         assert_eq!(body_json["id"], 2);
     }
 }
-
