@@ -6,16 +6,20 @@ use axum::{
     routing::{get, post},
 };
 
+pub mod auth;
 pub mod sse;
+
+use auth::AuthLayer;
 use chrono::Datelike;
 use dashmap::DashMap;
 use forge_core::audit::{AuditEvent, AuditWriter};
-use forge_core::config::{ForgeConfig, RbacPolicy};
+use forge_core::config::{DefaultSecretResolver, ForgeConfig, RbacPolicy, SecretResolver};
 use forge_core::injection::{InjectionDetector, InjectionMode};
-use forge_core::mcp::ToolRegistry;
+use forge_core::mcp::{ToolInfo, ToolRegistry};
 use governor::clock::DefaultClock;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 pub use sse::SessionStore;
@@ -104,14 +108,18 @@ pub struct ProxyAppState {
     pub injection_detector: Arc<InjectionDetector>,
     /// Active SSE sessions: session_id → sender for SSE event messages.
     pub sessions: SessionStore,
+    /// Resolved Bearer token for proxy auth (`None` = auth disabled).
+    /// Stored as `SecretString` to prevent accidental exposure in debug output or logs.
+    pub auth_token: Option<SecretString>,
 }
 
 impl ProxyAppState {
-    pub fn new(
+    pub async fn new(
         registry: ToolRegistry,
         config: ForgeConfig,
         audit: Option<Arc<AuditWriter>>,
     ) -> anyhow::Result<Self> {
+        let auth_token = resolve_auth_token(&config.proxy).await?;
         let injection_mode = parse_injection_mode(&config.guard.injection_mode)?;
 
         let rate_limiters = Arc::new(DashMap::new());
@@ -139,8 +147,23 @@ impl ProxyAppState {
             policies: Arc::new(policies),
             injection_detector: Arc::new(InjectionDetector::new(injection_mode)),
             sessions: Arc::new(DashMap::new()),
+            auth_token,
         })
     }
+}
+
+async fn resolve_auth_token(
+    proxy: &forge_core::config::ProxyConfig,
+) -> anyhow::Result<Option<SecretString>> {
+    let Some(secret_ref) = &proxy.auth_token else {
+        return Ok(None);
+    };
+    let resolver = DefaultSecretResolver;
+    let value = resolver
+        .resolve("proxy", secret_ref)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to resolve proxy auth_token: {}", e))?;
+    Ok(Some(SecretString::from(value.expose_secret())))
 }
 
 fn parse_injection_mode(mode: &str) -> anyhow::Result<InjectionMode> {
@@ -203,6 +226,10 @@ impl JsonRpcResponse {
 }
 
 pub fn build_router(state: ProxyAppState) -> Router {
+    let auth_token = state
+        .auth_token
+        .as_ref()
+        .map(|s: &SecretString| s.expose_secret().to_owned());
     Router::new()
         .route("/", post(handle_mcp_request))
         .route("/.well-known/mcp-servers.json", get(handle_well_known))
@@ -215,6 +242,7 @@ pub fn build_router(state: ProxyAppState) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(60),
         ))
+        .layer(AuthLayer::new(auth_token))
         .with_state(state)
 }
 
@@ -284,17 +312,22 @@ async fn handle_tools_list(
     state: &ProxyAppState,
     params: Option<Value>,
 ) -> Result<Value, ProxyError> {
-    let tools = if let Some(params) = params {
+    let tools: Vec<ToolInfo> = if let Some(params) = params {
         if let Some(server) = params.get("server").and_then(Value::as_str) {
-            let names = state
-                .registry
-                .list_tools(server)
-                .await
-                .map_err(ProxyError::internal)?;
-            names
+            let server_tools = state.registry.list_tools(server).await.map_err(|e| {
+                if forge_core::mcp::is_unknown_server_error(&e) {
+                    ProxyError::invalid_params(e.to_string())
+                } else {
+                    ProxyError::internal(e)
+                }
+            })?;
+            server_tools
                 .into_iter()
-                .map(|t| forge_core::protocol::namespace_tool(server, &t))
-                .collect::<Vec<_>>()
+                .map(|mut t| {
+                    t.name = forge_core::protocol::namespace_tool(server, &t.name);
+                    t
+                })
+                .collect()
         } else {
             state
                 .registry
@@ -310,17 +343,20 @@ async fn handle_tools_list(
             .map_err(ProxyError::internal)?
     };
 
-    let tool_objs: Vec<Value> = tools
-        .into_iter()
-        .map(|name| {
-            json!({
-                "name": name,
-                "inputSchema": { "type": "object", "properties": {} }
-            })
-        })
-        .collect();
+    let tool_objs: Vec<Value> = tools.into_iter().map(tool_info_to_json).collect();
 
     Ok(json!({ "tools": tool_objs }))
+}
+
+fn tool_info_to_json(t: ToolInfo) -> Value {
+    let mut obj = json!({
+        "name": t.name,
+        "inputSchema": t.input_schema,
+    });
+    if let Some(desc) = t.description {
+        obj["description"] = Value::String(desc);
+    }
+    obj
 }
 
 #[instrument(
@@ -341,13 +377,25 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    scan_args_for_injection(state, &args)?;
-
+    // Parse tool name first so server/tool are available for audit on every early return.
     let (server, orig_tool) = forge_core::protocol::parse_namespaced_tool(tool_name)
         .ok_or_else(|| ProxyError::invalid_params("tool name must be server__tool"))?;
 
     tracing::Span::current().record("server", server);
     tracing::Span::current().record("tool", orig_tool);
+
+    if let Err(e) = scan_args_for_injection(state, &args) {
+        write_audit_event(
+            state,
+            server,
+            orig_tool,
+            &args,
+            -32002,
+            0,
+            Some("injection in tool arguments".to_owned()),
+        );
+        return Err(e);
+    }
 
     check_policy_and_guards(state, server, orig_tool, &args)?;
 
@@ -357,7 +405,18 @@ async fn handle_tools_call(
     tracing::Span::current().record("latency_ms", latency_ms);
 
     if let Ok(ref v) = result {
-        scan_result_for_injection(state, v)?;
+        if let Err(e) = scan_result_for_injection(state, v) {
+            write_audit_event(
+                state,
+                server,
+                orig_tool,
+                &args,
+                -32002,
+                latency_ms,
+                Some("injection in tool result".to_owned()),
+            );
+            return Err(e);
+        }
     }
 
     let (result_code, error) = match &result {
@@ -429,6 +488,15 @@ fn check_policy_and_guards(
 
     if let Some(lim) = state.rate_limiters.get(server) {
         if lim.check().is_err() {
+            write_audit_event(
+                state,
+                server,
+                orig_tool,
+                args,
+                -32000,
+                0,
+                Some("rate limit exceeded".to_owned()),
+            );
             return Err(ProxyError::rate_limited(server));
         }
     }
@@ -438,10 +506,10 @@ fn check_policy_and_guards(
         .server
         .get(server)
         .ok_or_else(|| ProxyError::internal(anyhow::anyhow!("unknown server {}", server)))?;
-    state
-        .cost_guard
-        .check(server, srv_cfg.max_calls_per_day)
-        .map_err(ProxyError::internal)?;
+    if let Err(e) = state.cost_guard.check(server, srv_cfg.max_calls_per_day) {
+        write_audit_event(state, server, orig_tool, args, -429, 0, Some(e.to_string()));
+        return Err(ProxyError::internal(e));
+    }
 
     Ok(())
 }
@@ -633,7 +701,7 @@ mod tests {
     use std::collections::HashMap;
     use tower::util::ServiceExt;
 
-    fn test_state(registry: ToolRegistry) -> ProxyAppState {
+    async fn test_state(registry: ToolRegistry) -> ProxyAppState {
         let mut cfg = ForgeConfig::parse_str(
             r#"
 [server.local]
@@ -642,7 +710,9 @@ cmd = "true"
         )
         .expect("config");
         cfg.server.get_mut("local").unwrap().max_calls_per_min = 60;
-        ProxyAppState::new(registry, cfg, None).expect("state")
+        ProxyAppState::new(registry, cfg, None)
+            .await
+            .expect("state")
     }
 
     #[tokio::test]
@@ -657,7 +727,7 @@ cmd = "true"
             ])),
         );
 
-        let router = build_router(test_state(ToolRegistry::new(transports)));
+        let router = build_router(test_state(ToolRegistry::new(transports)).await);
         let request = Request::builder()
             .method("POST")
             .uri("/")
@@ -688,7 +758,7 @@ cmd = "true"
             Arc::new(MockMcpTransport::new(vec!["build".to_string()])),
         );
 
-        let router = build_router(test_state(ToolRegistry::new(transports)));
+        let router = build_router(test_state(ToolRegistry::new(transports)).await);
 
         let payload = json!({
             "method": "tools/call",
@@ -714,5 +784,96 @@ cmd = "true"
 
         assert_eq!(response_json["result"]["tool"], "build");
         assert_eq!(response_json["result"]["args"]["task"], "compile");
+    }
+}
+
+/// Test helpers exposed for integration tests in `tests/`.
+#[doc(hidden)]
+pub mod test_helpers {
+    use super::*;
+    use forge_core::config::{ForgeConfig, RbacPolicy};
+    use forge_core::injection::{InjectionDetector, InjectionMode};
+    use forge_core::mcp::ToolRegistry;
+    use std::collections::HashMap;
+    use std::num::NonZeroU32;
+    use std::sync::Arc;
+
+    pub fn make_state_with_registry(registry: ToolRegistry) -> ProxyAppState {
+        let cfg = ForgeConfig::parse_str(
+            r#"
+[server.test_server]
+cmd = "true"
+"#,
+        )
+        .expect("config");
+
+        let mut policies = HashMap::new();
+        for name in cfg.server.keys() {
+            policies.insert(
+                name.clone(),
+                RbacPolicy::from_server_config(&cfg.server[name]).expect("policy compile"),
+            );
+        }
+
+        ProxyAppState {
+            registry: Arc::new(registry),
+            config: Arc::new(cfg),
+            audit: None,
+            rate_limiters: Arc::new(DashMap::new()),
+            cost_guard: Arc::new(CostGuard::new()),
+            policies: Arc::new(policies),
+            injection_detector: Arc::new(InjectionDetector::new(InjectionMode::Block)),
+            sessions: Arc::new(DashMap::new()),
+            auth_token: None,
+        }
+    }
+
+    pub fn make_state_with_registry_and_rate_limit(
+        registry: ToolRegistry,
+        server_name: &str,
+        max_per_min: u32,
+    ) -> ProxyAppState {
+        let cfg = ForgeConfig::parse_str(&format!(
+            r#"
+[guard]
+enabled = true
+
+[server.{server_name}]
+cmd = "true"
+max_calls_per_min = {max_per_min}
+"#,
+            server_name = server_name,
+            max_per_min = max_per_min,
+        ))
+        .expect("config");
+
+        let rate_limiters = Arc::new(DashMap::new());
+        let n = NonZeroU32::new(max_per_min.max(1)).expect("valid rate limit");
+        let limiter = Arc::new(RateLimiter::direct(Quota::per_minute(n)));
+        rate_limiters.insert(server_name.to_string(), limiter);
+
+        let mut policies = HashMap::new();
+        policies.insert(
+            server_name.to_string(),
+            RbacPolicy::from_server_config(&cfg.server[server_name]).expect("policy compile"),
+        );
+
+        ProxyAppState {
+            registry: Arc::new(registry),
+            config: Arc::new(cfg),
+            audit: None,
+            rate_limiters,
+            cost_guard: Arc::new(CostGuard::new()),
+            policies: Arc::new(policies),
+            injection_detector: Arc::new(InjectionDetector::new(InjectionMode::Block)),
+            sessions: Arc::new(DashMap::new()),
+            auth_token: None,
+        }
+    }
+
+    pub fn make_state_with_auth(token: &str) -> ProxyAppState {
+        let mut state = make_state_with_registry(ToolRegistry::new(HashMap::new()));
+        state.auth_token = Some(SecretString::from(token));
+        state
     }
 }

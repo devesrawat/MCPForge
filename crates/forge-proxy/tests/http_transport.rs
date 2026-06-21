@@ -22,8 +22,8 @@ impl rmcp::ServerHandler for MockHandler {
         _req: Option<rmcp::model::PaginatedRequestParams>,
         _ctx: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl std::future::Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>>
-           + Send
-           + '_ {
+    + Send
+    + '_ {
         let schema: Arc<rmcp::model::JsonObject> = Arc::new(
             serde_json::from_value(serde_json::json!({"type":"object","properties":{}})).unwrap(),
         );
@@ -40,8 +40,8 @@ impl rmcp::ServerHandler for MockHandler {
         req: rmcp::model::CallToolRequestParams,
         _ctx: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
-           + Send
-           + '_ {
+    + Send
+    + '_ {
         let name = req.name.to_string();
         async move {
             Ok(rmcp::model::CallToolResult::success(vec![
@@ -54,8 +54,7 @@ impl rmcp::ServerHandler for MockHandler {
 async fn start_mock_http_server(tool_names: Vec<String>) -> std::net::SocketAddr {
     use axum::Router;
     use rmcp::transport::streamable_http_server::{
-        StreamableHttpServerConfig, StreamableHttpService,
-        session::local::LocalSessionManager,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -63,7 +62,11 @@ async fn start_mock_http_server(tool_names: Vec<String>) -> std::net::SocketAddr
 
     let session_manager = Arc::new(LocalSessionManager::default());
     let service = StreamableHttpService::new(
-        move || Ok(MockHandler { tool_names: tool_names.clone() }),
+        move || {
+            Ok(MockHandler {
+                tool_names: tool_names.clone(),
+            })
+        },
         session_manager,
         StreamableHttpServerConfig::default(),
     );
@@ -133,7 +136,10 @@ async fn test_config_http_server_without_url_fails_validation() {
 transport = "http"
 "#,
     );
-    assert!(result.is_err(), "http server without url should fail config validation");
+    assert!(
+        result.is_err(),
+        "http server without url should fail config validation"
+    );
 }
 
 #[tokio::test]
@@ -144,5 +150,49 @@ async fn test_config_sse_server_without_url_fails_validation() {
 transport = "sse"
 "#,
     );
-    assert!(result.is_err(), "sse server without url should fail config validation");
+    assert!(
+        result.is_err(),
+        "sse server without url should fail config validation"
+    );
+}
+
+/// Full round-trip test for LegacySseMcpTransport.
+///
+/// Exercises the pending-oneshot map, background SSE reader, and session-binding
+/// by using the forge-proxy's own /sse + /messages endpoints as the server side.
+#[tokio::test]
+async fn test_e2e_sse_transport_round_trip() {
+    use forge_core::mcp::{LegacySseMcpTransport, McpTransport, MockMcpTransport, ToolRegistry};
+    use std::collections::HashMap;
+
+    // Build a proxy backed by a MockMcpTransport with two tools.
+    let transport = MockMcpTransport::new(vec!["ping".to_string(), "query".to_string()]);
+    let mut transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
+    transports.insert("svc".to_string(), Arc::new(transport));
+    let registry = ToolRegistry::new(transports);
+
+    let state = forge_proxy::test_helpers::make_state_with_registry(registry);
+    let app = forge_proxy::build_router(state);
+
+    // Spin up a real TCP listener — LegacySseMcpTransport uses reqwest, not oneshot.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+
+    // Connect via legacy SSE transport and verify tools flow through end-to-end.
+    let sse_url = format!("http://{addr}/sse");
+    let client = LegacySseMcpTransport::connect(&sse_url, HashMap::new())
+        .await
+        .expect("legacy SSE connect should succeed");
+
+    let tools = client
+        .list_tools()
+        .await
+        .expect("list_tools should succeed");
+    assert_eq!(tools.len(), 2, "expected 2 tools, got: {:?}", tools);
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"svc__ping"), "names: {:?}", names);
+    assert!(names.contains(&"svc__query"), "names: {:?}", names);
 }

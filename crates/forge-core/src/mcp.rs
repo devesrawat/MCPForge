@@ -6,10 +6,10 @@ use rmcp::{
     RoleClient, ServiceExt,
     model::{CallToolRequestParams, JsonObject},
     service::RunningService,
-    transport::{ConfigureCommandExt, TokioChildProcess},
     transport::streamable_http_client::{
         StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
     },
+    transport::{ConfigureCommandExt, TokioChildProcess},
 };
 use secrecy::ExposeSecret;
 use serde_json::Value;
@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, oneshot};
+use tracing::warn;
 
 use crate::config::{
     DefaultSecretResolver, ForgeConfig, SecretResolver, ServerConfig, Transport, resolve_server_env,
@@ -275,10 +276,7 @@ pub struct LegacySseMcpTransport {
 }
 
 impl LegacySseMcpTransport {
-    pub async fn connect(
-        url: &str,
-        headers: HashMap<HeaderName, HeaderValue>,
-    ) -> Result<Self> {
+    pub async fn connect(url: &str, headers: HashMap<HeaderName, HeaderValue>) -> Result<Self> {
         use futures::StreamExt;
         use sse_stream::SseStream;
 
@@ -318,8 +316,8 @@ impl LegacySseMcpTransport {
             }
         }
 
-        let messages_url = messages_url
-            .ok_or_else(|| anyhow!("SSE server did not send an 'endpoint' event"))?;
+        let messages_url =
+            messages_url.ok_or_else(|| anyhow!("SSE server did not send an 'endpoint' event"))?;
 
         let pending: Arc<DashMap<u64, oneshot::Sender<Result<serde_json::Value>>>> =
             Arc::new(DashMap::new());
@@ -354,7 +352,11 @@ impl LegacySseMcpTransport {
         })
     }
 
-    async fn send_request(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    async fn send_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.inner.pending.insert(id, tx);
@@ -407,9 +409,10 @@ impl McpTransport for LegacySseMcpTransport {
             .map(|t| ToolInfo {
                 name: t["name"].as_str().unwrap_or("").to_string(),
                 description: t["description"].as_str().map(|s| s.to_string()),
-                input_schema: t.get("inputSchema").cloned().unwrap_or_else(|| {
-                    serde_json::json!({"type": "object", "properties": {}})
-                }),
+                input_schema: t
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}})),
             })
             .collect())
     }
@@ -542,7 +545,7 @@ impl ToolRegistry {
         let transport = self
             .transports
             .get(server)
-            .ok_or_else(|| anyhow!("unknown server: {}", server))?;
+            .ok_or_else(|| anyhow::anyhow!(unknown_server_message(server)))?;
         self.cached_list_tools(server, transport.as_ref()).await
     }
 
@@ -553,9 +556,45 @@ impl ToolRegistry {
         let transport = self
             .transports
             .get(server)
-            .ok_or_else(|| anyhow!("unknown server: {}", server))?;
+            .ok_or_else(|| anyhow::anyhow!(unknown_server_message(server)))?;
 
         transport.call_tool(tool, args).await
+    }
+}
+
+/// Message prefix for an unregistered server name (used by proxy error mapping).
+pub fn unknown_server_message(server: &str) -> String {
+    format!("unknown server: {server}")
+}
+
+/// Returns true when `err` refers to an unregistered server name.
+pub fn is_unknown_server_error(err: &anyhow::Error) -> bool {
+    err.to_string().starts_with("unknown server:")
+}
+
+/// Read tool-cache TTL from `FORGE_TOOL_CACHE_TTL_SECS`, default 60s.
+/// Logs a warning when the env var is set but not a valid positive integer.
+pub fn tool_cache_ttl_from_env() -> Duration {
+    const DEFAULT_SECS: u64 = 60;
+    match std::env::var("FORGE_TOOL_CACHE_TTL_SECS") {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => {
+                warn!(
+                    value = %raw,
+                    "FORGE_TOOL_CACHE_TTL_SECS must be > 0, using default {DEFAULT_SECS}s"
+                );
+                Duration::from_secs(DEFAULT_SECS)
+            }
+            Ok(secs) => Duration::from_secs(secs),
+            Err(_) => {
+                warn!(
+                    value = %raw,
+                    "invalid FORGE_TOOL_CACHE_TTL_SECS, using default {DEFAULT_SECS}s"
+                );
+                Duration::from_secs(DEFAULT_SECS)
+            }
+        },
+        Err(_) => Duration::from_secs(DEFAULT_SECS),
     }
 }
 
@@ -576,24 +615,57 @@ async fn build_auth_headers(
                     e
                 )
             })?;
-        let name = HeaderName::from_bytes(header_name.as_bytes()).map_err(|e| {
-            anyhow!("invalid header name '{}': {}", header_name, e)
-        })?;
-        let val = HeaderValue::from_str(value.expose_secret()).map_err(|e| {
-            anyhow!("invalid header value for '{}': {}", header_name, e)
-        })?;
+        let name = HeaderName::from_bytes(header_name.as_bytes())
+            .map_err(|e| anyhow!("invalid header name '{}': {}", header_name, e))?;
+        let val = HeaderValue::from_str(value.expose_secret())
+            .map_err(|e| anyhow!("invalid header value for '{}': {}", header_name, e))?;
         map.insert(name, val);
     }
     Ok(map)
 }
 
+/// Default timeout for remote MCP reachability probes (`forge check`, etc.).
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Verify an HTTP or SSE MCP server accepts a connection and responds to `tools/list`.
+pub async fn probe_server_reachable(name: &str, config: &ServerConfig) -> Result<()> {
+    use crate::config::Transport;
+
+    let url = config
+        .url
+        .as_deref()
+        .filter(|u| !u.trim().is_empty())
+        .ok_or_else(|| anyhow!("server '{name}': url required for remote transport"))?;
+
+    let headers = build_auth_headers(name, config).await?;
+    let probe = async {
+        match config.transport {
+            Transport::Http => {
+                let transport = HttpMcpTransport::connect_streamable(url, headers).await?;
+                transport.list_tools().await?;
+            }
+            Transport::Sse => {
+                let transport = LegacySseMcpTransport::connect(url, headers).await?;
+                transport.list_tools().await?;
+            }
+            Transport::Stdio => {}
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+
+    tokio::time::timeout(PROBE_TIMEOUT, probe)
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "server '{name}': timed out after {}s",
+                PROBE_TIMEOUT.as_secs()
+            )
+        })?
+}
+
 /// Connect all configured MCP servers (stdio, HTTP, or legacy SSE).
 pub async fn build_tool_registry(config: &ForgeConfig) -> Result<ToolRegistry> {
-    let ttl_secs = std::env::var("FORGE_TOOL_CACHE_TTL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(60);
-    let ttl = Duration::from_secs(ttl_secs);
+    let ttl = tool_cache_ttl_from_env();
 
     let mut map: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
     let pids: Arc<DashMap<String, Option<u32>>> = Arc::new(DashMap::new());
@@ -606,9 +678,10 @@ pub async fn build_tool_registry(config: &ForgeConfig) -> Result<ToolRegistry> {
                 pids.insert(name.clone(), pid);
             }
             Transport::Http => {
-                let url = server_cfg.url.as_deref().ok_or_else(|| {
-                    anyhow!("server '{}': url required for http transport", name)
-                })?;
+                let url = server_cfg
+                    .url
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("server '{}': url required for http transport", name))?;
                 let headers = build_auth_headers(name, server_cfg).await?;
                 let transport = HttpMcpTransport::connect_streamable(url, headers)
                     .await
@@ -617,9 +690,10 @@ pub async fn build_tool_registry(config: &ForgeConfig) -> Result<ToolRegistry> {
                 pids.insert(name.clone(), None);
             }
             Transport::Sse => {
-                let url = server_cfg.url.as_deref().ok_or_else(|| {
-                    anyhow!("server '{}': url required for sse transport", name)
-                })?;
+                let url = server_cfg
+                    .url
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("server '{}': url required for sse transport", name))?;
                 let headers = build_auth_headers(name, server_cfg).await?;
                 let transport = LegacySseMcpTransport::connect(url, headers)
                     .await
@@ -643,6 +717,50 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn test_is_unknown_server_error() {
+        let err = anyhow::anyhow!(unknown_server_message("missing"));
+        assert!(is_unknown_server_error(&err));
+        assert!(!is_unknown_server_error(&anyhow::anyhow!("other failure")));
+    }
+
+    #[test]
+    fn test_tool_cache_ttl_from_env_invalid_falls_back_to_60() {
+        // SAFETY: test-only env mutation.
+        unsafe { std::env::set_var("FORGE_TOOL_CACHE_TTL_SECS", "not_a_number") };
+        assert_eq!(tool_cache_ttl_from_env(), Duration::from_secs(60));
+        unsafe { std::env::remove_var("FORGE_TOOL_CACHE_TTL_SECS") };
+    }
+
+    #[test]
+    fn test_tool_cache_ttl_from_env_zero_falls_back_to_60() {
+        unsafe { std::env::set_var("FORGE_TOOL_CACHE_TTL_SECS", "0") };
+        assert_eq!(tool_cache_ttl_from_env(), Duration::from_secs(60));
+        unsafe { std::env::remove_var("FORGE_TOOL_CACHE_TTL_SECS") };
+    }
+
+    #[test]
+    fn test_tool_cache_ttl_from_env_valid_value() {
+        unsafe { std::env::set_var("FORGE_TOOL_CACHE_TTL_SECS", "120") };
+        assert_eq!(tool_cache_ttl_from_env(), Duration::from_secs(120));
+        unsafe { std::env::remove_var("FORGE_TOOL_CACHE_TTL_SECS") };
+    }
+
+    #[tokio::test]
+    async fn test_probe_server_reachable_fails_on_unreachable_http() {
+        let cfg = ForgeConfig::parse_str(
+            r#"
+[server.dead]
+transport = "http"
+url = "http://127.0.0.1:1"
+"#,
+        )
+        .unwrap();
+        let server = &cfg.server["dead"];
+        let result = probe_server_reachable("dead", server).await;
+        assert!(result.is_err(), "probe should fail for unreachable server");
+    }
 
     #[tokio::test]
     async fn test_tool_registry_default_ttl_is_60s() {
@@ -716,8 +834,7 @@ mod tests {
     #[tokio::test]
     async fn test_legacy_sse_transport_connect_fails_on_invalid_url() {
         let headers = HashMap::new();
-        let result =
-            LegacySseMcpTransport::connect("http://127.0.0.1:19998/sse", headers).await;
+        let result = LegacySseMcpTransport::connect("http://127.0.0.1:19998/sse", headers).await;
         assert!(
             result.is_err(),
             "connection to non-existent SSE server should fail"

@@ -9,7 +9,7 @@ pub mod validation;
 
 pub use policy::{RbacPolicy, validate_all_servers};
 pub use secret::{DefaultSecretResolver, SecretRef, SecretResolver};
-pub use validation::{ValidationError, validate_server_name};
+pub use validation::{ValidationError, validate_server_name, validate_server_transport};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -25,10 +25,14 @@ pub struct ForgeConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    pub cmd: String,
+    #[serde(default)]
+    pub cmd: Option<String>,
 
     #[serde(default = "default_transport")]
     pub transport: Transport,
+
+    #[serde(default)]
+    pub url: Option<String>,
 
     #[serde(default)]
     pub secret: HashMap<String, SecretRef>,
@@ -102,6 +106,12 @@ pub struct ProxyConfig {
 
     #[serde(default = "default_proxy_port")]
     pub port: u16,
+
+    /// Optional Bearer token for proxy authentication.
+    /// If set, all requests (except `/.well-known/`) must include
+    /// `Authorization: Bearer <token>`.
+    #[serde(default)]
+    pub auth_token: Option<SecretRef>,
 }
 
 fn default_proxy_bind() -> String {
@@ -118,6 +128,7 @@ impl Default for ProxyConfig {
             enabled: false,
             bind: default_proxy_bind(),
             port: default_proxy_port(),
+            auth_token: None,
         }
     }
 }
@@ -127,6 +138,23 @@ impl Default for ProxyConfig {
 pub enum Transport {
     Stdio,
     Http,
+    Sse,
+}
+
+impl Transport {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Transport::Stdio => "stdio",
+            Transport::Http => "http",
+            Transport::Sse => "sse",
+        }
+    }
+}
+
+impl std::fmt::Display for Transport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 fn default_transport() -> Transport {
@@ -167,12 +195,10 @@ impl ForgeConfig {
 
 impl ServerConfig {
     pub fn cmd_parts(&self) -> Vec<String> {
-        shell_words::split(&self.cmd).unwrap_or_else(|_| {
-            self.cmd
-                .split_whitespace()
-                .map(|part| part.to_owned())
-                .collect()
-        })
+        self.cmd
+            .as_deref()
+            .and_then(|c| shell_words::split(c).ok())
+            .unwrap_or_default()
     }
 }
 
@@ -181,7 +207,7 @@ pub async fn resolve_server_env(config: &ServerConfig) -> anyhow::Result<HashMap
     let mut env_vars = config.env.clone();
     for (key, secret_ref) in &config.secret {
         let value = resolver
-            .resolve(&config.cmd, secret_ref)
+            .resolve(config.cmd.as_deref().unwrap_or(""), secret_ref)
             .await
             .with_context(|| format!("failed to resolve secret '{}'", key))?;
         env_vars.insert(key.clone(), value.expose_secret().to_owned());

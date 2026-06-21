@@ -4,16 +4,16 @@ use clap::Args;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use forge_core::audit::AuditReader;
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
-    Frame, Terminal,
 };
 use std::{
     collections::VecDeque,
@@ -34,10 +34,6 @@ const SPARKLINE_BUCKETS: usize = 20;
 const RATE_WINDOW_SECS: f64 = 10.0;
 /// Sparkline characters from low to high.
 const SPARK_CHARS: &[char] = &['\u{2581}', '\u{2582}', '\u{2583}', '\u{2585}', '\u{2587}'];
-/// Histogram bar character.
-const HIST_BAR: &str = "\u{2588}";
-/// Histogram background bar.
-const HIST_BG: &str = "\u{2591}";
 
 // ─── Sort Mode ────────────────────────────────────────────────────────
 
@@ -74,15 +70,6 @@ impl StatusFilter {
             StatusFilter::Errors => "errors",
             StatusFilter::Denials => "denials",
             StatusFilter::Blocked => "blocked",
-        }
-    }
-
-    fn matches(&self, result_code: i32) -> bool {
-        match self {
-            StatusFilter::All => true,
-            StatusFilter::Errors => result_code != 0,
-            StatusFilter::Denials => result_code == -403,
-            StatusFilter::Blocked => result_code == -32002,
         }
     }
 }
@@ -166,9 +153,21 @@ struct App {
     input_mode: InputMode,
 }
 
+/// RAII guard that restores the terminal on drop, regardless of whether
+/// `run()` returns normally or exits via `?`.
+struct RawModeGuard;
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+    }
+}
+
 impl Watch {
     pub fn run(self) -> Result<()> {
         enable_raw_mode()?;
+        let _guard = RawModeGuard;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
@@ -239,11 +238,9 @@ impl Watch {
             }
         }
 
-        disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
-        terminal.show_cursor()?;
-
+        terminal.show_cursor().ok();
         Ok(())
+        // _guard drops here: disable_raw_mode + LeaveAlternateScreen + DisableMouseCapture
     }
 }
 
@@ -294,7 +291,11 @@ impl App {
             }
             KeyCode::Char('/') => {
                 self.follow = !self.follow;
-                let msg = if self.follow { "follow on" } else { "follow off" };
+                let msg = if self.follow {
+                    "follow on"
+                } else {
+                    "follow off"
+                };
                 self.message = Some(msg.to_string());
             }
             KeyCode::Char('f') => {
@@ -353,7 +354,11 @@ impl App {
                 if let Some(e) = self.events.get(self.selected) {
                     let label = format!("{}__{}", e.server, e.tool);
                     // Update existing or create new.
-                    if let Some(bm) = self.bookmarks.iter_mut().find(|b| b.row_index == self.selected) {
+                    if let Some(bm) = self
+                        .bookmarks
+                        .iter_mut()
+                        .find(|b| b.row_index == self.selected)
+                    {
                         bm.event_id = e.id.clone();
                         bm.label = label;
                     } else {
@@ -363,18 +368,30 @@ impl App {
                             row_index: self.selected,
                         });
                     }
-                    self.message = Some(format!("bookmarked: {} ({})", self.selected + 1, self.bookmarks.len()));
+                    self.message = Some(format!(
+                        "bookmarked: {} ({})",
+                        self.selected + 1,
+                        self.bookmarks.len()
+                    ));
                 }
             }
             // Next bookmark (n key).
             KeyCode::Char('n') => {
-                if let Some(current) = self.bookmarks.iter().position(|b| b.row_index == self.selected) {
+                if let Some(current) = self
+                    .bookmarks
+                    .iter()
+                    .position(|b| b.row_index == self.selected)
+                {
                     let next = (current + 1) % self.bookmarks.len();
-                    self.selected = self.bookmarks[next].row_index.min(self.events.len().saturating_sub(1));
+                    self.selected = self.bookmarks[next]
+                        .row_index
+                        .min(self.events.len().saturating_sub(1));
                     self.state.select(Some(self.selected));
                     self.message = Some(format!("bookmark {}/{}", next + 1, self.bookmarks.len()));
                 } else if !self.bookmarks.is_empty() {
-                    self.selected = self.bookmarks[0].row_index.min(self.events.len().saturating_sub(1));
+                    self.selected = self.bookmarks[0]
+                        .row_index
+                        .min(self.events.len().saturating_sub(1));
                     self.state.select(Some(self.selected));
                     self.message = Some(format!("bookmark 1/{}", self.bookmarks.len()));
                 }
@@ -567,8 +584,13 @@ impl App {
         let path = std::env::current_dir().ok()?.join(&filename);
         let mut w = csv::WriterBuilder::new().from_path(&path).ok()?;
         w.write_record([
-            "timestamp", "server", "tool", "result_code", "latency_ms",
-            "error", "args_json",
+            "timestamp",
+            "server",
+            "tool",
+            "result_code",
+            "latency_ms",
+            "error",
+            "args_json",
         ])
         .ok()?;
         for e in &self.events {
@@ -735,11 +757,7 @@ impl App {
     fn current_rate(&self) -> f64 {
         let now = Instant::now();
         let cutoff = now - Duration::from_secs_f64(RATE_WINDOW_SECS);
-        let recent = self
-            .event_times
-            .iter()
-            .filter(|t| **t >= cutoff)
-            .count() as f64;
+        let recent = self.event_times.iter().filter(|t| **t >= cutoff).count() as f64;
         recent / RATE_WINDOW_SECS
     }
 
@@ -758,11 +776,7 @@ impl App {
     fn render_stats(&self, f: &mut Frame, area: Rect) {
         let total = self.events.len();
         let errors = self.events.iter().filter(|e| e.result_code != 0).count();
-        let denials = self
-            .events
-            .iter()
-            .filter(|e| e.result_code == -403)
-            .count();
+        let denials = self.events.iter().filter(|e| e.result_code == -403).count();
         let blocked = self
             .events
             .iter()
@@ -816,7 +830,10 @@ impl App {
                 },
             ),
             Span::raw("  "),
-            Span::styled(format!("avg={:.0}ms", avg_lat), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("avg={:.0}ms", avg_lat),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw("  "),
             Span::styled(
                 format!("p50={} p95={} p99={}", p50, p95, p99),
@@ -831,10 +848,7 @@ impl App {
 
         if !sparkline.is_empty() {
             line_spans.push(Span::raw("  "));
-            line_spans.push(Span::styled(
-                sparkline,
-                Style::default().fg(Color::Green),
-            ));
+            line_spans.push(Span::styled(sparkline, Style::default().fg(Color::Green)));
         }
 
         line_spans.push(Span::raw("  "));
@@ -844,11 +858,8 @@ impl App {
         ));
 
         let text = Text::from(vec![Line::from(line_spans)]);
-        let stats = Paragraph::new(text).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" stats "),
-        );
+        let stats =
+            Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" stats "));
         f.render_widget(stats, area);
     }
 
@@ -869,8 +880,8 @@ impl App {
         buckets
             .iter()
             .map(|&v| {
-                let idx = ((v as f64 / max_val as f64) * (SPARK_CHARS.len() - 1) as f64)
-                    .round() as usize;
+                let idx =
+                    ((v as f64 / max_val as f64) * (SPARK_CHARS.len() - 1) as f64).round() as usize;
                 SPARK_CHARS[idx.min(SPARK_CHARS.len() - 1)]
             })
             .collect()
@@ -880,7 +891,9 @@ impl App {
         let text = format!(" / {}", self.search_text);
         let bar = Paragraph::new(Span::styled(
             text,
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
         f.render_widget(bar, area);
     }
@@ -982,23 +995,16 @@ impl App {
 
         let e = &self.events[self.selected];
         let lat_style = latency_style(e.latency_ms);
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled(
-                    format!(
-                        "[{}] {}__{}",
-                        self.selected + 1,
-                        e.server,
-                        e.tool
-                    ),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(format!("{}ms", e.latency_ms), lat_style),
-            ]),
-        ];
+        let mut lines = vec![Line::from(vec![
+            Span::styled(
+                format!("[{}] {}__{}", self.selected + 1, e.server, e.tool),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(format!("{}ms", e.latency_ms), lat_style),
+        ])];
 
         if let Some(ref args) = e.args_json {
             let rendered = serde_json::from_str::<serde_json::Value>(args)
@@ -1014,7 +1020,9 @@ impl App {
             if rendered.lines().count() > available_lines {
                 lines.push(Line::from(Span::styled(
                     "... (more below, use scroll to browse events)",
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
                 )));
             }
         }
@@ -1023,9 +1031,7 @@ impl App {
             lines.push(Line::from(vec![
                 Span::styled(
                     "error: ",
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(err, Style::default().fg(Color::Red)),
             ]));
@@ -1033,11 +1039,7 @@ impl App {
 
         let detail = Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" detail "),
-            );
+            .block(Block::default().borders(Borders::ALL).title(" detail "));
         f.render_widget(detail, detail_area);
     }
 
@@ -1163,20 +1165,13 @@ fn status_span(code: i32) -> Span<'static> {
         ),
         -32002 => Span::styled(
             "blocked",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         -1 => Span::styled(
             "error",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
-        other => Span::styled(
-            format!("rc={}", other),
-            Style::default().fg(Color::Yellow),
-        ),
+        other => Span::styled(format!("rc={}", other), Style::default().fg(Color::Yellow)),
     }
 }
 
@@ -1448,6 +1443,8 @@ mod tests {
             message: None,
             event_times: VecDeque::new(),
             input_mode: InputMode::Normal,
+            bookmarks: Vec::new(),
+            status_filter: StatusFilter::All,
         }
     }
 
