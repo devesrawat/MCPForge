@@ -10,17 +10,18 @@ use std::time::{Duration, Instant};
 
 /// Returns `true` if the process with the given PID is alive.
 ///
-/// On Unix this uses `kill -0` (signal 0), which checks process existence
-/// without sending a real signal.  On non-Unix platforms we conservatively
-/// assume the process is alive so the caller proceeds with the normal kill.
+/// Uses the kill(2) syscall with signal 0 directly to avoid the shell `kill`
+/// command's u32→i32 truncation bug (u32::MAX becomes -1, which signals every
+/// process and returns success). PIDs that don't fit in a positive i32 cannot
+/// exist on any Unix and are reported as dead immediately.
 fn is_pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        if pid == 0 || pid > i32::MAX as u32 {
+            return false;
+        }
+        // SAFETY: signal 0 never delivers anything; it only probes existence.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
     #[cfg(not(unix))]
     {
