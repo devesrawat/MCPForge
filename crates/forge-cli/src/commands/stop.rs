@@ -52,7 +52,10 @@ impl Stop {
                 if !is_pid_alive(pid) {
                     // Process is already gone; clean up the stale pid file.
                     let _ = fs::remove_file(&p);
-                    println!("Removed stale pid file (process {} is no longer running)", pid);
+                    println!(
+                        "Removed stale pid file (process {} is no longer running)",
+                        pid
+                    );
                     continue;
                 }
                 let status = Command::new("kill")
@@ -76,28 +79,6 @@ impl Stop {
         Err(anyhow!(
             "no running forge proxy found. Start one with: forge start --daemon"
         ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_pid_alive;
-
-    #[test]
-    fn current_process_is_alive() {
-        let pid = std::process::id();
-        assert!(is_pid_alive(pid), "current process should be alive");
-    }
-
-    #[test]
-    fn zero_pid_is_not_alive() {
-        // PID 0 is not a real process; kill -0 0 signals the whole process group
-        // which may or may not succeed, but PID 0 is never a forge process.
-        // We just verify is_pid_alive(u32::MAX) returns false (unlikely to exist).
-        assert!(
-            !is_pid_alive(u32::MAX),
-            "PID u32::MAX should not be alive"
-        );
     }
 }
 
@@ -134,4 +115,23 @@ fn stop_one_server(server: &str) -> Result<()> {
     }
     println!("Stop requested for server '{}' (pid {})", server, pid);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_pid_alive;
+
+    #[test]
+    fn current_process_is_alive() {
+        let pid = std::process::id();
+        assert!(is_pid_alive(pid), "current process should be alive");
+    }
+
+    #[test]
+    fn zero_pid_is_not_alive() {
+        // PID 0 is not a real process; kill -0 0 signals the whole process group
+        // which may or may not succeed, but PID 0 is never a forge process.
+        // We just verify is_pid_alive(u32::MAX) returns false (unlikely to exist).
+        assert!(!is_pid_alive(u32::MAX), "PID u32::MAX should not be alive");
+    }
 }

@@ -116,7 +116,15 @@ impl AuditEvent {
         error: Option<String>,
         session_id: Option<String>,
     ) -> Self {
-        Self::new_with_latency_us(server, tool, args, result_code, latency_us, error, session_id)
+        Self::new_with_latency_us(
+            server,
+            tool,
+            args,
+            result_code,
+            latency_us,
+            error,
+            session_id,
+        )
     }
 
     fn hash_args(args: &Value) -> String {
@@ -155,9 +163,17 @@ fn scrub_args(value: &Value) -> Value {
 /// Returns true when a key name suggests it may hold a sensitive credential.
 fn is_sensitive_key(key: &str) -> bool {
     let lower = key.to_lowercase();
-    ["password", "token", "secret", "api_key", "auth", "key", "credential"]
-        .iter()
-        .any(|pattern| lower.contains(pattern))
+    [
+        "password",
+        "token",
+        "secret",
+        "api_key",
+        "auth",
+        "key",
+        "credential",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
 }
 
 pub struct AuditWriter {
@@ -171,11 +187,9 @@ impl AuditWriter {
         // MAX(version) returns NULL (not QueryReturnedNoRows) on an empty table,
         // so a single query_row call always succeeds.
         let on_disk: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(version) FROM schema_version",
-                [],
-                |r| r.get::<_, Option<i64>>(0),
-            )
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })
             .with_context(|| "failed to read schema_version from audit database")?;
 
         match on_disk {
@@ -329,11 +343,9 @@ impl AuditReader {
         // QueryReturnedNoRows. ORDER BY / MAX also prevents a stale low-version
         // row from being picked up if the table ever has duplicates.
         let on_disk: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(version) FROM schema_version",
-                [],
-                |r| r.get::<_, Option<i64>>(0),
-            )
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })
             .with_context(|| "failed to read schema_version from audit database")?;
 
         match on_disk {

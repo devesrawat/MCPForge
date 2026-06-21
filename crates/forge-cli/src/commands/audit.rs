@@ -111,37 +111,25 @@ fn parse_since(text: &str) -> Result<DateTime<Utc>> {
     if let Some(value) = text.strip_suffix('s') {
         let seconds: i64 = value.parse()?;
         if seconds <= 0 {
-            return Err(anyhow::anyhow!(
-                "duration must be positive, got: {}",
-                text
-            ));
+            return Err(anyhow::anyhow!("duration must be positive, got: {}", text));
         }
         Ok(now - Duration::seconds(seconds))
     } else if let Some(value) = text.strip_suffix('m') {
         let minutes: i64 = value.parse()?;
         if minutes <= 0 {
-            return Err(anyhow::anyhow!(
-                "duration must be positive, got: {}",
-                text
-            ));
+            return Err(anyhow::anyhow!("duration must be positive, got: {}", text));
         }
         Ok(now - Duration::minutes(minutes))
     } else if let Some(value) = text.strip_suffix('h') {
         let hours: i64 = value.parse()?;
         if hours <= 0 {
-            return Err(anyhow::anyhow!(
-                "duration must be positive, got: {}",
-                text
-            ));
+            return Err(anyhow::anyhow!("duration must be positive, got: {}", text));
         }
         Ok(now - Duration::hours(hours))
     } else if let Some(value) = text.strip_suffix('d') {
         let days: i64 = value.parse()?;
         if days <= 0 {
-            return Err(anyhow::anyhow!(
-                "duration must be positive, got: {}",
-                text
-            ));
+            return Err(anyhow::anyhow!("duration must be positive, got: {}", text));
         }
         Ok(now - Duration::days(days))
     } else {

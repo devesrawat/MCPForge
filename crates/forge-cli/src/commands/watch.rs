@@ -219,17 +219,16 @@ impl Watch {
                 app.poll_timeout_ms.min(500)
             };
 
-            if event::poll(Duration::from_millis(poll_ms))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        match app.input_mode {
-                            InputMode::Normal => app.handle_normal_key(key),
-                            InputMode::Search => app.handle_search_key(key),
-                            InputMode::Help => {
-                                // Any key dismisses help overlay.
-                                app.input_mode = InputMode::Normal;
-                            }
-                        }
+            if event::poll(Duration::from_millis(poll_ms))?
+                && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                match app.input_mode {
+                    InputMode::Normal => app.handle_normal_key(key),
+                    InputMode::Search => app.handle_search_key(key),
+                    InputMode::Help => {
+                        // Any key dismisses help overlay.
+                        app.input_mode = InputMode::Normal;
                     }
                 }
             }
@@ -527,7 +526,8 @@ impl App {
         match self.sort_mode {
             SortMode::Time => self.events.sort_by_key(|e| e.ts),
             SortMode::Latency => {
-                self.events.sort_by(|a, b| b.latency_ms.cmp(&a.latency_ms));
+                self.events
+                    .sort_by_key(|event| std::cmp::Reverse(event.latency_ms));
             }
             SortMode::Server => self
                 .events
@@ -538,12 +538,12 @@ impl App {
     fn sort_and_reselect(&mut self) {
         let old_id = self.events.get(self.selected).map(|e| e.id.clone());
         self.sort_events();
-        if let Some(id) = old_id {
-            if let Some(idx) = self.events.iter().position(|e| e.id == id) {
-                self.selected = idx;
-                self.state.select(Some(self.selected));
-                return;
-            }
+        if let Some(id) = old_id
+            && let Some(idx) = self.events.iter().position(|e| e.id == id)
+        {
+            self.selected = idx;
+            self.state.select(Some(self.selected));
+            return;
         }
         self.selected = self.selected.min(self.events.len().saturating_sub(1));
         self.state.select(Some(self.selected));
@@ -652,10 +652,7 @@ impl App {
             _ => 0,
         };
 
-        let mut constraints = vec![
-            Constraint::Length(title_h),
-            Constraint::Length(stats_h),
-        ];
+        let mut constraints = vec![Constraint::Length(title_h), Constraint::Length(stats_h)];
         if search_h > 0 {
             constraints.push(Constraint::Length(search_h));
         }
@@ -926,11 +923,7 @@ impl App {
         let table_title = if self.search_text.is_empty() {
             format!(" log  ({})", self.events.len())
         } else {
-            format!(
-                " log  ({}/{})",
-                self.events.len(),
-                self.pre_filter_count
-            )
+            format!(" log  ({}/{})", self.events.len(), self.pre_filter_count)
         };
 
         let mut header_cells = vec![

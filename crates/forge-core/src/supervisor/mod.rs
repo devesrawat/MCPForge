@@ -578,8 +578,12 @@ fn write_state_file(
     let tmp = dir.join(format!(".forge_state_tmp_{}", std::process::id()));
     fs::write(&tmp, &json)
         .with_context(|| format!("failed to write temp state file '{}'", tmp.display()))?;
-    fs::rename(&tmp, state_path)
-        .with_context(|| format!("failed to rename temp state file to '{}'", state_path.display()))?;
+    fs::rename(&tmp, state_path).with_context(|| {
+        format!(
+            "failed to rename temp state file to '{}'",
+            state_path.display()
+        )
+    })?;
     Ok(())
 }
 

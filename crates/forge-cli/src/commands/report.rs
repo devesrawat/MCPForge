@@ -183,10 +183,7 @@ fn summarize_events(
     rows
 }
 
-fn summarize_totals(
-    rows: &[ReportRow],
-    events: &[forge_core::audit::AuditRecord],
-) -> ReportRow {
+fn summarize_totals(rows: &[ReportRow], events: &[forge_core::audit::AuditRecord]) -> ReportRow {
     let calls = rows.iter().map(|row| row.calls).sum();
     let errors = rows.iter().map(|row| row.errors).sum();
     let total_latency: f64 = rows

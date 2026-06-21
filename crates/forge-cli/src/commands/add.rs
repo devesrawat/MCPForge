@@ -19,7 +19,10 @@ pub struct Add {
     )]
     pub transport: String,
 
-    #[arg(long, help = "Command to launch the MCP server (required for stdio transport)")]
+    #[arg(
+        long,
+        help = "Command to launch the MCP server (required for stdio transport)"
+    )]
     pub cmd: Option<String>,
 
     #[arg(long, help = "Base URL for http or sse transport")]
@@ -72,8 +75,7 @@ impl Add {
             max_restarts: None,
         };
 
-        validate_server_transport(&self.name, &server)
-            .map_err(|e| anyhow::anyhow!("{}", e.0))?;
+        validate_server_transport(&self.name, &server).map_err(|e| anyhow::anyhow!("{}", e.0))?;
 
         cfg.server.insert(self.name.clone(), server);
 
@@ -152,12 +154,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         run_add_in(
             dir.path(),
-            &add(
-                "remote",
-                None,
-                "http",
-                Some("http://127.0.0.1:8080/mcp"),
-            ),
+            &add("remote", None, "http", Some("http://127.0.0.1:8080/mcp")),
         )
         .unwrap();
         let cfg = ForgeConfig::load_from_file(dir.path().join("forge.toml")).unwrap();
@@ -227,12 +224,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         run_add_in(
             dir.path(),
-            &add(
-                "linear",
-                None,
-                "sse",
-                Some("https://mcp.linear.app/sse"),
-            ),
+            &add("linear", None, "sse", Some("https://mcp.linear.app/sse")),
         )
         .unwrap();
         let cfg = ForgeConfig::load_from_file(dir.path().join("forge.toml")).unwrap();

@@ -29,6 +29,7 @@ lcov.info
 tarpaulin-report.html
 coverage/
 PLAN.md
+.claude/worktrees/
 
 # Generated / session documentation — do not commit
 VALIDATION_REPORT.md
