@@ -42,6 +42,18 @@ pub trait SecretResolver: Send + Sync {
     async fn resolve(&self, service: &str, secret_ref: &SecretRef) -> Result<SecretString>;
 }
 
+/// OS keychain service name to store/read secrets under. Scoped to the
+/// active `FORGE_HOME` override so secrets for different clients (each
+/// run with a different `FORGE_HOME`) never collide in the OS keychain.
+/// When `FORGE_HOME` is unset, returns the plain `"mcp-forge"` name used
+/// by every existing install, so already-stored secrets keep working.
+pub fn keychain_service_name() -> String {
+    match crate::supervisor::forge_home_override() {
+        Some(home) => format!("mcp-forge:{home}"),
+        None => "mcp-forge".to_owned(),
+    }
+}
+
 pub struct DefaultSecretResolver;
 
 #[async_trait]
@@ -52,12 +64,14 @@ impl SecretResolver for DefaultSecretResolver {
                 .map(SecretString::from)
                 .map_err(|_| anyhow!("env var '{}' not set (needed by server '{}')", var, service)),
             SecretRef::Keychain(key) => {
-                let entry = Entry::new("mcp-forge", key)
+                let keychain_service = keychain_service_name();
+                let entry = Entry::new(&keychain_service, key)
                     .map_err(|e| anyhow!("invalid keychain entry '{}': {}", key, e))?;
                 match entry.get_password() {
                     Ok(password) => Ok(SecretString::from(password)),
                     Err(keyring::Error::NoEntry) => Err(anyhow!(
-                        "keychain entry 'mcp-forge/{}' not found. Run: forge secret set {}",
+                        "keychain entry '{}/{}' not found. Run: forge secret set {}",
+                        keychain_service,
                         key,
                         key
                     )),
@@ -77,5 +91,34 @@ impl SecretResolver for DefaultSecretResolver {
             }
             SecretRef::Literal(value) => Ok(SecretString::from(value.clone())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keychain_service_name;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn keychain_service_name_is_unscoped_by_default() {
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: serialized by env_lock(); FORGE_HOME is Forge-private.
+        unsafe { std::env::remove_var("FORGE_HOME") };
+        assert_eq!(keychain_service_name(), "mcp-forge");
+    }
+
+    #[test]
+    fn keychain_service_name_is_scoped_when_forge_home_set() {
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: serialized by env_lock().
+        unsafe { std::env::set_var("FORGE_HOME", "/tmp/client-a") };
+        assert_eq!(keychain_service_name(), "mcp-forge:/tmp/client-a");
+        // SAFETY: serialized by env_lock().
+        unsafe { std::env::remove_var("FORGE_HOME") };
     }
 }

@@ -8,7 +8,7 @@ pub mod secret;
 pub mod validation;
 
 pub use policy::{RbacPolicy, validate_all_servers};
-pub use secret::{DefaultSecretResolver, SecretRef, SecretResolver};
+pub use secret::{DefaultSecretResolver, SecretRef, SecretResolver, keychain_service_name};
 pub use validation::{ValidationError, validate_server_name, validate_server_transport};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
