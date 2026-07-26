@@ -9,6 +9,19 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Rate-limit, cost-limit, and prompt-injection-blocked tool calls are
+  now written to the audit trail (previously only RBAC policy denials
+  were logged) — `forge audit`/`forge report`/`forge watch` now show
+  the full picture of what an agent attempted, not just what succeeded
+  plus policy denials.
+- `forge watch`'s status column now shows "rate-limited" and
+  "cost-limited" labels instead of a raw result code.
+- `forge report --format markdown`: new export format with a
+  denials-by-reason breakdown, suitable for sharing directly with a
+  client as a compliance artifact.
+
 ### Fixed
 
 - Keychain secrets now scope to the active `FORGE_HOME` override
