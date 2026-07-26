@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use forge_core::config::{DefaultSecretResolver, SecretRef, SecretResolver};
+use forge_core::config::{DefaultSecretResolver, SecretRef, SecretResolver, keychain_service_name};
 use keyring::Entry;
 use secrecy::ExposeSecret;
 use std::fs;
@@ -97,13 +97,14 @@ impl Set {
         if pw.is_empty() {
             anyhow::bail!("secret value must not be empty");
         }
-        let entry = Entry::new("mcp-forge", &self.name)
+        let service = keychain_service_name();
+        let entry = Entry::new(&service, &self.name)
             .map_err(|e| anyhow::anyhow!("invalid keychain entry: {}", e))?;
         entry
             .set_password(&pw)
             .map_err(|e| anyhow::anyhow!("failed to store in keychain: {}", e))?;
         append_secret_index(&self.name)?;
-        println!("Stored '{}' in keychain (service mcp-forge)", self.name);
+        println!("Stored '{}' in keychain (service {})", self.name, service);
         Ok(())
     }
 }
@@ -130,7 +131,7 @@ impl Ls {
 
 impl Rm {
     pub fn run(&self) -> Result<()> {
-        let entry = Entry::new("mcp-forge", &self.name)
+        let entry = Entry::new(&keychain_service_name(), &self.name)
             .map_err(|e| anyhow::anyhow!("invalid keychain entry: {}", e))?;
         entry
             .delete_credential()
