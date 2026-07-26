@@ -624,6 +624,7 @@ pub enum ProxyError {
     RateLimited(String),
     PolicyDenied(String),
     InjectionDetected(String),
+    CostLimited(String),
     Internal(anyhow::Error),
 }
 
@@ -648,6 +649,10 @@ impl ProxyError {
         ProxyError::InjectionDetected(message.into())
     }
 
+    pub fn cost_limited(message: impl Into<String>) -> Self {
+        ProxyError::CostLimited(message.into())
+    }
+
     pub fn internal(error: impl Into<anyhow::Error>) -> Self {
         ProxyError::Internal(error.into())
     }
@@ -660,6 +665,7 @@ impl ProxyError {
             ProxyError::RateLimited(_) => -32000,   // App: rate limited
             ProxyError::PolicyDenied(_) => -32001,  // App: policy denied
             ProxyError::InjectionDetected(_) => -32002, // App: security violation
+            ProxyError::CostLimited(_) => -32003,   // App: daily cost/call limit exceeded
         }
     }
 }
@@ -671,6 +677,7 @@ impl std::fmt::Display for ProxyError {
             ProxyError::MethodNotFound(method) => write!(f, "Method not found: {}", method),
             ProxyError::RateLimited(s) => write!(f, "Rate limit exceeded for server '{}'", s),
             ProxyError::PolicyDenied(m) => write!(f, "{}", m),
+            ProxyError::CostLimited(m) => write!(f, "{}", m),
             ProxyError::InjectionDetected(m) => write!(f, "Security violation: {}", m),
             ProxyError::Internal(err) => write!(f, "Internal error: {}", err),
         }
