@@ -13,7 +13,7 @@ use crate::supervisor;
 
 /// Result-code conventions for denial events written to the audit log.
 /// `0` means success; `-1` is a generic tool-call error set ad hoc at
-/// its call site (not a "denial reason", so not named here). These four
+/// its call site (not a "denial reason", so not named here). These five
 /// values distinguish *why* a call never reached the upstream MCP
 /// server, so `forge report`'s denials-by-reason breakdown and `forge
 /// watch`'s status filter/labels can group and match on them.
@@ -22,11 +22,12 @@ use crate::supervisor;
 /// reasons (existing stored audit data and `forge watch`'s "Denials"
 /// filter depend on this exact value) and does not match
 /// `ProxyError::PolicyDenied`'s JSON-RPC wire code (`-32001`). The other
-/// three reuse their corresponding `ProxyError::code()` value.
+/// four reuse their corresponding `ProxyError::code()` value.
 pub const RESULT_CODE_POLICY_DENIED: i32 = -403;
 pub const RESULT_CODE_RATE_LIMITED: i32 = -32000;
 pub const RESULT_CODE_COST_LIMITED: i32 = -32003;
 pub const RESULT_CODE_INJECTION_BLOCKED: i32 = -32002;
+pub const RESULT_CODE_DESTRUCTIVE_BLOCKED: i32 = -32004;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditRecord {
