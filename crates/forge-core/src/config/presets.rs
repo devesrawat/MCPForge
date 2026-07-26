@@ -7,9 +7,9 @@
 //! state, leave every read-only tool allowed by omission.
 
 /// `@modelcontextprotocol/server-github` (verified against the
-/// `2025.4.8` tag of `modelcontextprotocol/servers-archived`, since the
-/// package is deprecated and no longer on the `main` branch of the
-/// current `modelcontextprotocol/servers` repo).
+/// resolvable `2025.4.8` tag of `modelcontextprotocol/servers` — the
+/// package is deprecated and its source is no longer on that repo's
+/// `main` branch, which is why a tag rather than `main` is cited here).
 pub const GITHUB_DENY_TOOLS: &[&str] = &[
     "create_or_update_file",
     "push_files",
@@ -76,5 +76,22 @@ mod tests {
     fn known_presets_lists_both_available_names() {
         let presets = known_presets();
         assert_eq!(presets, &["github", "filesystem"]);
+    }
+
+    /// Guards against `known_presets()` advertising a name that
+    /// `preset_deny_tools()` doesn't actually recognize (e.g. a future
+    /// preset added to one list but not the other) — such drift would
+    /// otherwise surface only as a confusing "unknown preset" error for
+    /// a name the CLI's own error message just told the user was valid.
+    #[test]
+    fn every_known_preset_has_a_nonempty_deny_list() {
+        for name in known_presets() {
+            let tools = preset_deny_tools(name);
+            assert!(
+                tools.is_some_and(|list| !list.is_empty()),
+                "known preset '{}' has no matching non-empty deny list",
+                name
+            );
+        }
     }
 }

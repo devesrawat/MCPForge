@@ -354,4 +354,33 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join("forge.toml")).unwrap();
         assert!(!text.contains("deny_tools"));
     }
+
+    /// Guards the `--preset` flag's compiled `--help` text against
+    /// drifting away from `known_presets()` — e.g. a new preset added
+    /// to `known_presets()` without updating the hardcoded help string
+    /// literal above would otherwise leave `--help` silently stale.
+    /// Reads clap's actual compiled help text via `Args::augment_args`
+    /// rather than re-checking the source string literal, so this fails
+    /// if the real `--help` output goes out of sync, not just the source.
+    #[test]
+    fn preset_help_text_lists_every_known_preset() {
+        use clap::Args as _;
+        let cmd = Add::augment_args(clap::Command::new("add"));
+        let preset_arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "preset")
+            .expect("--preset arg exists");
+        let help = preset_arg
+            .get_help()
+            .map(|h| h.to_string())
+            .unwrap_or_default();
+        for name in forge_core::config::known_presets() {
+            assert!(
+                help.contains(name),
+                "--preset help text missing '{}': {}",
+                name,
+                help
+            );
+        }
+    }
 }
