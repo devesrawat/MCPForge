@@ -63,8 +63,9 @@ impl Report {
 
         let cost_per_server = load_cost_map(&self.config);
 
-        let rows = summarize_events(&events, &cost_per_server);
-        let total = summarize_totals(&rows, &events);
+        let executed_events = filter_executed_events(&events);
+        let rows = summarize_events(&executed_events, &cost_per_server);
+        let total = summarize_totals(&rows, &executed_events);
 
         match self.format {
             OutputFormat::Json => {
@@ -153,6 +154,22 @@ fn denial_reason(result_code: i32) -> Option<&'static str> {
         forge_core::audit::RESULT_CODE_INJECTION_BLOCKED => Some("injection-blocked"),
         _ => None,
     }
+}
+
+/// Calls that never reached the upstream tool (denied, rate-limited,
+/// cost-limited, or injection-blocked) always carry latency 0 and never
+/// incurred real cost. Excluding them from the calls/cost/latency summary
+/// prevents "Est cost" (calls * unit) from being inflated and avg/p99
+/// latency from being pulled toward zero. They remain fully represented
+/// via `denial_counts` on the unfiltered event set.
+fn filter_executed_events(
+    events: &[forge_core::audit::AuditRecord],
+) -> Vec<forge_core::audit::AuditRecord> {
+    events
+        .iter()
+        .filter(|e| denial_reason(e.result_code).is_none())
+        .cloned()
+        .collect()
 }
 
 fn denial_counts(
@@ -385,6 +402,31 @@ mod tests {
             error: None,
             session_id: None,
         }
+    }
+
+    #[test]
+    fn filter_executed_events_drops_all_four_denial_reasons() {
+        use forge_core::audit::{
+            RESULT_CODE_COST_LIMITED, RESULT_CODE_INJECTION_BLOCKED, RESULT_CODE_POLICY_DENIED,
+            RESULT_CODE_RATE_LIMITED,
+        };
+        let events = vec![
+            make_record("github", 0),  // success, kept
+            make_record("github", -1), // generic error, kept — it DID reach the tool
+            make_record("github", RESULT_CODE_POLICY_DENIED),
+            make_record("github", RESULT_CODE_RATE_LIMITED),
+            make_record("github", RESULT_CODE_COST_LIMITED),
+            make_record("github", RESULT_CODE_INJECTION_BLOCKED),
+        ];
+
+        let executed = super::filter_executed_events(&events);
+
+        assert_eq!(executed.len(), 2);
+        assert!(
+            executed
+                .iter()
+                .all(|e| e.result_code == 0 || e.result_code == -1)
+        );
     }
 
     #[test]
