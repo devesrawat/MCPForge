@@ -4,10 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub mod policy;
+pub mod presets;
 pub mod secret;
 pub mod validation;
 
 pub use policy::{RbacPolicy, validate_all_servers};
+pub use presets::{known_presets, preset_deny_tools};
 pub use secret::{DefaultSecretResolver, SecretRef, SecretResolver, keychain_service_name};
 pub use validation::{ValidationError, validate_server_name, validate_server_transport};
 
