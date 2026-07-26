@@ -25,6 +25,14 @@ Versions follow [Semantic Versioning](https://semver.org/).
   source-verified `deny_tools` list of mutating operations for that
   server type, so a new server starts with real protection instead of
   an empty policy. Omitting `--preset` is unchanged (empty `deny_tools`).
+- New destructive-pattern guard: tool calls whose name (e.g.
+  `delete_*`, `drop_*`, `force_*`) or arguments (e.g. `rm -rf`,
+  `DROP TABLE`) match a known destructive pattern are blocked by
+  default when `guard.enabled = true`, configurable via
+  `guard.destructive_pattern_mode = "warn"|"block"` (default `"block"`).
+  Blocked calls are audit-logged and show up in `forge report`'s
+  denials-by-reason breakdown and `forge watch`'s "Blocked" filter,
+  consistent with the other guard-triggered denial reasons.
 
 ### Fixed
 
