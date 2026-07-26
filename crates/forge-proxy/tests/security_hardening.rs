@@ -535,6 +535,81 @@ cmd = "true"
         let _ = std::fs::remove_file(&db_path);
     }
 
+    /// Exercises the `.or_else(scan_arguments)` fallback specifically:
+    /// the tool name itself is clean, so this only blocks if the
+    /// argument-scanning half of `check_destructive_pattern` actually
+    /// runs.
+    #[tokio::test]
+    async fn destructive_argument_is_blocked_when_tool_name_is_clean() {
+        let state = make_state(
+            r#"
+[guard]
+enabled = true
+
+[server.local]
+cmd = "true"
+"#,
+            "local",
+            vec!["run_command"],
+        );
+        let resp = post_rpc(
+            state,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": "local__run_command",
+                    "arguments": { "cmd": "rm -rf /data" }
+                },
+                "id": 1
+            }),
+        )
+        .await;
+
+        assert!(
+            !resp["error"].is_null(),
+            "destructive argument should be blocked even with a clean tool name"
+        );
+        let message = resp["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            message.to_lowercase().contains("destructive"),
+            "error should mention destructive pattern, got: {}",
+            message
+        );
+    }
+
+    #[tokio::test]
+    async fn destructive_pattern_in_warn_mode_allows_call_through() {
+        let state = make_state(
+            r#"
+[guard]
+enabled = true
+destructive_pattern_mode = "warn"
+
+[server.local]
+cmd = "true"
+"#,
+            "local",
+            vec!["delete_file"],
+        );
+        let resp = post_rpc(
+            state,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": { "name": "local__delete_file", "arguments": {} },
+                "id": 1
+            }),
+        )
+        .await;
+
+        assert!(
+            resp["error"].is_null(),
+            "warn mode should allow the call through, got error: {}",
+            resp["error"]
+        );
+    }
+
     #[tokio::test]
     async fn rbac_allow_permits_non_denied_tool() {
         let state = make_state(
