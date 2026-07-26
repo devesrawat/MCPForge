@@ -449,6 +449,93 @@ max_calls_per_min = 1
     }
 
     #[tokio::test]
+    async fn destructive_tool_name_is_blocked_and_audit_logged() {
+        use forge_core::audit::{
+            AuditQuery, AuditReader, AuditWriter, RESULT_CODE_DESTRUCTIVE_BLOCKED,
+        };
+        use std::time::{Duration, Instant};
+
+        let db_path = std::env::temp_dir().join(format!(
+            "mcp_forge_destructive_audit_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let audit = Arc::new(AuditWriter::new(&db_path).expect("failed to create audit writer"));
+
+        let cfg = ForgeConfig::parse_str(
+            r#"
+[guard]
+enabled = true
+
+[server.local]
+cmd = "true"
+"#,
+        )
+        .expect("config parse");
+        let mut transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
+        transports.insert(
+            "local".to_string(),
+            Arc::new(MockMcpTransport::new(vec!["delete_everything".to_string()])),
+        );
+        let state = ProxyAppState::new(ToolRegistry::new(transports), cfg, Some(audit.clone()))
+            .expect("state");
+
+        let router = build_router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "tools/call",
+                    "params": { "name": "local__delete_everything", "arguments": {} },
+                    "id": 1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp_bytes = to_bytes(router.oneshot(req).await.unwrap().into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&resp_bytes).unwrap();
+        assert!(
+            !resp["error"].is_null(),
+            "destructive tool name should be blocked"
+        );
+
+        let reader = AuditReader::open(&db_path).expect("failed to open reader");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let events = loop {
+            let events = reader
+                .query_events(AuditQuery::default(), Some(10))
+                .expect("failed to query events");
+            if events
+                .iter()
+                .any(|e| e.result_code == RESULT_CODE_DESTRUCTIVE_BLOCKED)
+            {
+                break events;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for destructive-blocked audit event"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        };
+
+        let blocked: Vec<_> = events
+            .iter()
+            .filter(|e| e.result_code == RESULT_CODE_DESTRUCTIVE_BLOCKED)
+            .collect();
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].tool, "delete_everything");
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
     async fn rbac_allow_permits_non_denied_tool() {
         let state = make_state(
             r#"

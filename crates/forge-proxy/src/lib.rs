@@ -17,6 +17,7 @@ use chrono::Datelike;
 use dashmap::DashMap;
 use forge_core::audit::{AuditEvent, AuditWriter};
 use forge_core::config::{ForgeConfig, RbacPolicy};
+use forge_core::destructive::{DestructiveMode, DestructivePatternDetector};
 use forge_core::injection::{InjectionDetector, InjectionMode};
 use forge_core::mcp::ToolRegistry;
 use governor::clock::DefaultClock;
@@ -108,6 +109,7 @@ pub struct ProxyAppState {
     pub cost_guard: Arc<CostGuard>,
     pub policies: Arc<HashMap<String, RbacPolicy>>,
     pub injection_detector: Arc<InjectionDetector>,
+    pub destructive_detector: Arc<DestructivePatternDetector>,
     /// Active SSE sessions: session_id → sender for SSE event messages.
     pub sessions: SessionStore,
     /// Optional Bearer token for proxy auth. `None` = auth disabled.
@@ -121,6 +123,7 @@ impl ProxyAppState {
         audit: Option<Arc<AuditWriter>>,
     ) -> anyhow::Result<Self> {
         let injection_mode = parse_injection_mode(&config.guard.injection_mode)?;
+        let destructive_mode = parse_destructive_mode(&config.guard.destructive_pattern_mode)?;
 
         let rate_limiters = Arc::new(DashMap::new());
         for (name, srv) in &config.server {
@@ -146,6 +149,7 @@ impl ProxyAppState {
             cost_guard: Arc::new(CostGuard::new()),
             policies: Arc::new(policies),
             injection_detector: Arc::new(InjectionDetector::new(injection_mode)),
+            destructive_detector: Arc::new(DestructivePatternDetector::new(destructive_mode)),
             sessions: Arc::new(DashMap::new()),
             auth_token: None,
         })
@@ -158,6 +162,17 @@ fn parse_injection_mode(mode: &str) -> anyhow::Result<InjectionMode> {
         "block" => Ok(InjectionMode::Block),
         other => Err(anyhow::anyhow!(
             "invalid guard.injection_mode '{}'; expected 'warn' or 'block'",
+            other
+        )),
+    }
+}
+
+fn parse_destructive_mode(mode: &str) -> anyhow::Result<DestructiveMode> {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "warn" => Ok(DestructiveMode::Warn),
+        "block" => Ok(DestructiveMode::Block),
+        other => Err(anyhow::anyhow!(
+            "invalid guard.destructive_pattern_mode '{}'; expected 'warn' or 'block'",
             other
         )),
     }
@@ -479,6 +494,7 @@ async fn handle_tools_call(
     tracing::Span::current().record("tool", orig_tool);
 
     scan_args_for_injection(state, server, orig_tool, &args)?;
+    check_destructive_pattern(state, server, orig_tool, &args)?;
 
     check_policy_and_guards(state, server, orig_tool, &args)?;
 
@@ -543,6 +559,48 @@ fn scan_args_for_injection(
         return Err(err);
     }
     Ok(())
+}
+
+fn check_destructive_pattern(
+    state: &ProxyAppState,
+    server: &str,
+    orig_tool: &str,
+    args: &Value,
+) -> Result<(), ProxyError> {
+    if !state.config.guard.enabled {
+        return Ok(());
+    }
+    let alert = state
+        .destructive_detector
+        .scan_tool_name(orig_tool)
+        .or_else(|| state.destructive_detector.scan_arguments(args));
+    let Some(alert) = alert else {
+        return Ok(());
+    };
+    tracing::warn!(
+        matched = alert.matched,
+        location = ?alert.location,
+        "destructive pattern detected"
+    );
+    if state.destructive_detector.mode() != DestructiveMode::Block {
+        return Ok(());
+    }
+    let err = ProxyError::destructive_blocked(format!(
+        "tool call matches a destructive pattern ('{}' in {:?})",
+        alert.matched, alert.location
+    ));
+    if let Some(aw) = &state.audit {
+        aw.log(AuditEvent::new(
+            server,
+            orig_tool,
+            args,
+            forge_core::audit::RESULT_CODE_DESTRUCTIVE_BLOCKED,
+            0,
+            Some(err.to_string()),
+            None,
+        ));
+    }
+    Err(err)
 }
 
 fn check_policy_and_guards(
@@ -682,6 +740,7 @@ pub enum ProxyError {
     PolicyDenied(String),
     InjectionDetected(String),
     CostLimited(String),
+    DestructiveBlocked(String),
     Internal(anyhow::Error),
 }
 
@@ -710,6 +769,10 @@ impl ProxyError {
         ProxyError::CostLimited(message.into())
     }
 
+    pub fn destructive_blocked(message: impl Into<String>) -> Self {
+        ProxyError::DestructiveBlocked(message.into())
+    }
+
     pub fn internal(error: impl Into<anyhow::Error>) -> Self {
         ProxyError::Internal(error.into())
     }
@@ -723,6 +786,7 @@ impl ProxyError {
             ProxyError::PolicyDenied(_) => -32001,  // App: policy denied
             ProxyError::InjectionDetected(_) => -32002, // App: security violation
             ProxyError::CostLimited(_) => -32003,   // App: daily cost/call limit exceeded
+            ProxyError::DestructiveBlocked(_) => -32004, // App: destructive pattern blocked
         }
     }
 }
@@ -735,6 +799,7 @@ impl std::fmt::Display for ProxyError {
             ProxyError::RateLimited(s) => write!(f, "Rate limit exceeded for server '{}'", s),
             ProxyError::PolicyDenied(m) => write!(f, "{}", m),
             ProxyError::CostLimited(m) => write!(f, "{}", m),
+            ProxyError::DestructiveBlocked(m) => write!(f, "{}", m),
             ProxyError::InjectionDetected(m) => write!(f, "Security violation: {}", m),
             ProxyError::Internal(err) => write!(f, "Internal error: {}", err),
         }
