@@ -21,6 +21,10 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - `forge report --format markdown`: new export format with a
   denials-by-reason breakdown, suitable for sharing directly with a
   client as a compliance artifact.
+- `forge add --preset <github|filesystem>`: applies a curated,
+  source-verified `deny_tools` list of mutating operations for that
+  server type, so a new server starts with real protection instead of
+  an empty policy. Omitting `--preset` is unchanged (empty `deny_tools`).
 
 ### Fixed
 
