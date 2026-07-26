@@ -18,6 +18,7 @@ pub enum Period {
 pub enum OutputFormat {
     Text,
     Json,
+    Markdown,
 }
 
 #[derive(Debug, Args)]
@@ -75,6 +76,12 @@ impl Report {
                         "summary": rows,
                         "total": total,
                     }))?
+                );
+            }
+            OutputFormat::Markdown => {
+                print!(
+                    "{}",
+                    render_markdown(&self.period, &self.server, &rows, &total, &events)
                 );
             }
             OutputFormat::Text => {
@@ -136,6 +143,83 @@ fn load_cost_map(config_path: &Path) -> HashMap<String, f64> {
         .into_iter()
         .filter_map(|(name, s)| s.estimated_cost_per_call_usd.map(|c| (name, c.max(0.0))))
         .collect()
+}
+
+fn denial_reason(result_code: i32) -> Option<&'static str> {
+    match result_code {
+        forge_core::audit::RESULT_CODE_POLICY_DENIED => Some("policy-denied"),
+        forge_core::audit::RESULT_CODE_RATE_LIMITED => Some("rate-limited"),
+        forge_core::audit::RESULT_CODE_COST_LIMITED => Some("cost-limited"),
+        forge_core::audit::RESULT_CODE_INJECTION_BLOCKED => Some("injection-blocked"),
+        _ => None,
+    }
+}
+
+fn denial_counts(
+    events: &[forge_core::audit::AuditRecord],
+) -> BTreeMap<(String, &'static str), usize> {
+    let mut counts: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
+    for event in events {
+        if let Some(reason) = denial_reason(event.result_code) {
+            *counts.entry((event.server.clone(), reason)).or_default() += 1;
+        }
+    }
+    counts
+}
+
+fn render_markdown(
+    period: &Period,
+    server_filter: &Option<String>,
+    rows: &[ReportRow],
+    total: &ReportRow,
+    events: &[forge_core::audit::AuditRecord],
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# Forge Report ({:?})\n\n", period));
+    if let Some(s) = server_filter {
+        out.push_str(&format!("Filtered to server: `{}`\n\n", s));
+    }
+
+    out.push_str("## Usage Summary\n\n");
+    out.push_str("| Server | Calls | Errors | Err% | Avg lat | P99 lat | Est cost |\n");
+    out.push_str("|---|---:|---:|---:|---:|---:|---:|\n");
+    for row in rows {
+        out.push_str(&format!(
+            "| {} | {} | {} | {:.1}% | {:.2}ms | {:.2}ms | ${:.2} |\n",
+            row.server,
+            row.calls,
+            row.errors,
+            row.error_rate * 100.0,
+            row.avg_latency,
+            row.p99_latency,
+            row.cost,
+        ));
+    }
+    out.push_str(&format!(
+        "| **TOTAL** | {} | {} | {:.1}% | {:.2}ms | {:.2}ms | ${:.2} |\n\n",
+        total.calls,
+        total.errors,
+        total.error_rate * 100.0,
+        total.avg_latency,
+        total.p99_latency,
+        total.cost,
+    ));
+
+    out.push_str("## Denials by Reason\n\n");
+    let denials = denial_counts(events);
+    if denials.is_empty() {
+        out.push_str(
+            "No denied, rate-limited, cost-limited, or injection-blocked calls in this period.\n",
+        );
+    } else {
+        out.push_str("| Server | Reason | Count |\n");
+        out.push_str("|---|---|---:|\n");
+        for ((server, reason), count) in &denials {
+            out.push_str(&format!("| {} | {} | {} |\n", server, reason, count));
+        }
+    }
+
+    out
 }
 
 fn summarize_events(
@@ -250,7 +334,7 @@ fn bar(value: usize, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::load_cost_map;
+    use super::{Period, ReportRow, load_cost_map};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -285,5 +369,101 @@ mod tests {
         let path = unique_temp_path("missing_cost_map");
         let map = load_cost_map(&path);
         assert!(map.is_empty());
+    }
+
+    fn make_record(server: &str, result_code: i32) -> forge_core::audit::AuditRecord {
+        forge_core::audit::AuditRecord {
+            id: format!("{}-{}", server, result_code),
+            ts: 0,
+            server: server.to_string(),
+            tool: "t".to_string(),
+            args_hash: "abc".to_string(),
+            args_json: None,
+            result_code,
+            latency_ms: 0,
+            latency_us: None,
+            error: None,
+            session_id: None,
+        }
+    }
+
+    #[test]
+    fn denial_counts_groups_by_server_and_reason() {
+        use forge_core::audit::{
+            RESULT_CODE_COST_LIMITED, RESULT_CODE_INJECTION_BLOCKED, RESULT_CODE_POLICY_DENIED,
+            RESULT_CODE_RATE_LIMITED,
+        };
+        let events = vec![
+            make_record("github", 0),                        // success, not a denial
+            make_record("github", -1),                        // generic error, not a denial
+            make_record("github", RESULT_CODE_POLICY_DENIED),
+            make_record("github", RESULT_CODE_POLICY_DENIED),
+            make_record("github", RESULT_CODE_RATE_LIMITED),
+            make_record("postgres", RESULT_CODE_COST_LIMITED),
+            make_record("postgres", RESULT_CODE_INJECTION_BLOCKED),
+        ];
+
+        let counts = super::denial_counts(&events);
+
+        assert_eq!(
+            counts.get(&("github".to_string(), "policy-denied")),
+            Some(&2)
+        );
+        assert_eq!(
+            counts.get(&("github".to_string(), "rate-limited")),
+            Some(&1)
+        );
+        assert_eq!(
+            counts.get(&("postgres".to_string(), "cost-limited")),
+            Some(&1)
+        );
+        assert_eq!(
+            counts.get(&("postgres".to_string(), "injection-blocked")),
+            Some(&1)
+        );
+        assert_eq!(counts.len(), 4);
+    }
+
+    #[test]
+    fn render_markdown_includes_denials_section() {
+        use forge_core::audit::RESULT_CODE_POLICY_DENIED;
+        let events = vec![make_record("github", RESULT_CODE_POLICY_DENIED)];
+        let rows = vec![];
+        let total = ReportRow {
+            server: "TOTAL".to_string(),
+            calls: 0,
+            errors: 0,
+            error_rate: 0.0,
+            avg_latency: 0.0,
+            p99_latency: 0.0,
+            cost: 0.0,
+        };
+
+        let markdown = super::render_markdown(&Period::Week, &None, &rows, &total, &events);
+
+        assert!(markdown.contains("# Forge Report"));
+        assert!(markdown.contains("## Denials by Reason"));
+        assert!(markdown.contains("github"));
+        assert!(markdown.contains("policy-denied"));
+        assert!(markdown.contains("1"));
+    }
+
+    #[test]
+    fn render_markdown_notes_no_denials_when_none_present() {
+        let events: Vec<forge_core::audit::AuditRecord> = vec![];
+        let rows = vec![];
+        let total = ReportRow {
+            server: "TOTAL".to_string(),
+            calls: 0,
+            errors: 0,
+            error_rate: 0.0,
+            avg_latency: 0.0,
+            p99_latency: 0.0,
+            cost: 0.0,
+        };
+
+        let markdown = super::render_markdown(&Period::Week, &None, &rows, &total, &events);
+
+        assert!(markdown.contains("No denied, rate-limited, cost-limited, or injection-blocked calls"));
     }
 }
