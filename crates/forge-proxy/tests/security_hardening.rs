@@ -355,6 +355,100 @@ max_calls_per_min = 1
     }
 
     #[tokio::test]
+    async fn rate_limited_call_is_audit_logged() {
+        use forge_core::audit::{AuditQuery, AuditReader, AuditWriter, RESULT_CODE_RATE_LIMITED};
+        use std::time::{Duration, Instant};
+
+        let db_path = std::env::temp_dir().join(format!(
+            "mcp_forge_rate_limit_audit_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let audit = Arc::new(AuditWriter::new(&db_path).expect("failed to create audit writer"));
+
+        let cfg = ForgeConfig::parse_str(
+            r#"
+[guard]
+enabled = true
+
+[server.local]
+cmd = "true"
+max_calls_per_min = 1
+"#,
+        )
+        .expect("config parse");
+        let mut transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
+        transports.insert(
+            "local".to_string(),
+            Arc::new(MockMcpTransport::new(vec!["ping".to_string()])),
+        );
+        let state = ProxyAppState::new(ToolRegistry::new(transports), cfg, Some(audit.clone()))
+            .expect("state");
+
+        let router = build_router(state);
+
+        let make_req = || {
+            Request::builder()
+                .method("POST")
+                .uri("/")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "tools/call",
+                        "params": { "name": "local__ping", "arguments": {} },
+                        "id": 1
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        // First call — succeeds, consumes the single per-minute token.
+        let _ = router.clone().oneshot(make_req()).await.unwrap();
+        // Second immediate call — rejected by the rate limiter.
+        let _ = router.oneshot(make_req()).await.unwrap();
+
+        // AuditWriter logs asynchronously via a background thread; poll
+        // with a timeout rather than reading immediately, matching the
+        // pattern in forge-core's audit_writer_writes_and_reader_reads test.
+        let reader = AuditReader::open(&db_path).expect("failed to open reader");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let events = loop {
+            let events = reader
+                .query_events(AuditQuery::default(), Some(10))
+                .expect("failed to query events");
+            if events
+                .iter()
+                .any(|e| e.result_code == RESULT_CODE_RATE_LIMITED)
+            {
+                break events;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for rate-limit audit event"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        };
+
+        let rate_limited: Vec<_> = events
+            .iter()
+            .filter(|e| e.result_code == RESULT_CODE_RATE_LIMITED)
+            .collect();
+        assert_eq!(
+            rate_limited.len(),
+            1,
+            "expected exactly one rate-limited audit event"
+        );
+        assert_eq!(rate_limited[0].server, "local");
+        assert_eq!(rate_limited[0].tool, "ping");
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
     async fn rbac_allow_permits_non_denied_tool() {
         let state = make_state(
             r#"

@@ -472,13 +472,13 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    scan_args_for_injection(state, &args)?;
-
     let (server, orig_tool) = forge_core::protocol::parse_namespaced_tool(tool_name)
         .ok_or_else(|| ProxyError::invalid_params("tool name must be server__tool"))?;
 
     tracing::Span::current().record("server", server);
     tracing::Span::current().record("tool", orig_tool);
+
+    scan_args_for_injection(state, server, orig_tool, &args)?;
 
     check_policy_and_guards(state, server, orig_tool, &args)?;
 
@@ -489,7 +489,7 @@ async fn handle_tools_call(
     tracing::Span::current().record("latency_ms", latency_ms);
 
     if let Ok(ref v) = result {
-        scan_result_for_injection(state, v)?;
+        scan_result_for_injection(state, server, orig_tool, &args, v)?;
     }
 
     let (result_code, error) = match &result {
@@ -509,7 +509,12 @@ async fn handle_tools_call(
     result.map_err(ProxyError::internal)
 }
 
-fn scan_args_for_injection(state: &ProxyAppState, args: &Value) -> Result<(), ProxyError> {
+fn scan_args_for_injection(
+    state: &ProxyAppState,
+    server: &str,
+    orig_tool: &str,
+    args: &Value,
+) -> Result<(), ProxyError> {
     if !state.config.guard.enabled {
         return Ok(());
     }
@@ -522,9 +527,19 @@ fn scan_args_for_injection(state: &ProxyAppState, args: &Value) -> Result<(), Pr
         );
     }
     if !alerts.is_empty() && state.injection_detector.mode() == InjectionMode::Block {
-        return Err(ProxyError::injection_detected(
-            "Potential prompt injection detected in arguments",
-        ));
+        let err = ProxyError::injection_detected("Potential prompt injection detected in arguments");
+        if let Some(aw) = &state.audit {
+            aw.log(AuditEvent::new(
+                server,
+                orig_tool,
+                args,
+                forge_core::audit::RESULT_CODE_INJECTION_BLOCKED,
+                0,
+                Some(err.to_string()),
+                None,
+            ));
+        }
+        return Err(err);
     }
     Ok(())
 }
@@ -544,7 +559,7 @@ fn check_policy_and_guards(
                 server,
                 orig_tool,
                 args,
-                -403,
+                forge_core::audit::RESULT_CODE_POLICY_DENIED,
                 0,
                 Some("tool blocked by policy".to_owned()),
                 None,
@@ -560,7 +575,19 @@ fn check_policy_and_guards(
     if let Some(lim) = state.rate_limiters.get(server)
         && lim.check().is_err()
     {
-        return Err(ProxyError::rate_limited(server));
+        let err = ProxyError::rate_limited(server);
+        if let Some(aw) = &state.audit {
+            aw.log(AuditEvent::new(
+                server,
+                orig_tool,
+                args,
+                forge_core::audit::RESULT_CODE_RATE_LIMITED,
+                0,
+                Some(err.to_string()),
+                None,
+            ));
+        }
+        return Err(err);
     }
 
     let srv_cfg = state
@@ -568,15 +595,32 @@ fn check_policy_and_guards(
         .server
         .get(server)
         .ok_or_else(|| ProxyError::internal(anyhow::anyhow!("unknown server {}", server)))?;
-    state
-        .cost_guard
-        .check(server, srv_cfg.max_calls_per_day)
-        .map_err(ProxyError::internal)?;
+    if let Err(cost_err) = state.cost_guard.check(server, srv_cfg.max_calls_per_day) {
+        let err = ProxyError::cost_limited(cost_err.to_string());
+        if let Some(aw) = &state.audit {
+            aw.log(AuditEvent::new(
+                server,
+                orig_tool,
+                args,
+                forge_core::audit::RESULT_CODE_COST_LIMITED,
+                0,
+                Some(err.to_string()),
+                None,
+            ));
+        }
+        return Err(err);
+    }
 
     Ok(())
 }
 
-fn scan_result_for_injection(state: &ProxyAppState, result: &Value) -> Result<(), ProxyError> {
+fn scan_result_for_injection(
+    state: &ProxyAppState,
+    server: &str,
+    orig_tool: &str,
+    args: &Value,
+    result: &Value,
+) -> Result<(), ProxyError> {
     if !state.config.guard.enabled {
         return Ok(());
     }
@@ -587,9 +631,20 @@ fn scan_result_for_injection(state: &ProxyAppState, result: &Value) -> Result<()
             "prompt injection detected in tool result (indirect injection)"
         );
         if state.injection_detector.mode() == InjectionMode::Block {
-            return Err(ProxyError::injection_detected(
-                "Potential prompt injection detected in tool result",
-            ));
+            let err =
+                ProxyError::injection_detected("Potential prompt injection detected in tool result");
+            if let Some(aw) = &state.audit {
+                aw.log(AuditEvent::new(
+                    server,
+                    orig_tool,
+                    args,
+                    forge_core::audit::RESULT_CODE_INJECTION_BLOCKED,
+                    0,
+                    Some(err.to_string()),
+                    None,
+                ));
+            }
+            return Err(err);
         }
     }
     Ok(())
