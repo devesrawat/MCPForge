@@ -527,7 +527,8 @@ fn scan_args_for_injection(
         );
     }
     if !alerts.is_empty() && state.injection_detector.mode() == InjectionMode::Block {
-        let err = ProxyError::injection_detected("Potential prompt injection detected in arguments");
+        let err =
+            ProxyError::injection_detected("Potential prompt injection detected in arguments");
         if let Some(aw) = &state.audit {
             aw.log(AuditEvent::new(
                 server,
@@ -631,8 +632,9 @@ fn scan_result_for_injection(
             "prompt injection detected in tool result (indirect injection)"
         );
         if state.injection_detector.mode() == InjectionMode::Block {
-            let err =
-                ProxyError::injection_detected("Potential prompt injection detected in tool result");
+            let err = ProxyError::injection_detected(
+                "Potential prompt injection detected in tool result",
+            );
             if let Some(aw) = &state.audit {
                 aw.log(AuditEvent::new(
                     server,

@@ -744,10 +744,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         // SAFETY: serialized by env_lock().
         unsafe { std::env::set_var("FORGE_HOME", "  /tmp/client-a  ") };
-        assert_eq!(
-            forge_home_override(),
-            Some("/tmp/client-a".to_owned())
-        );
+        assert_eq!(forge_home_override(), Some("/tmp/client-a".to_owned()));
         // SAFETY: serialized by env_lock().
         unsafe { std::env::remove_var("FORGE_HOME") };
     }

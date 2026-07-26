@@ -394,8 +394,8 @@ mod tests {
             RESULT_CODE_RATE_LIMITED,
         };
         let events = vec![
-            make_record("github", 0),                        // success, not a denial
-            make_record("github", -1),                        // generic error, not a denial
+            make_record("github", 0),  // success, not a denial
+            make_record("github", -1), // generic error, not a denial
             make_record("github", RESULT_CODE_POLICY_DENIED),
             make_record("github", RESULT_CODE_POLICY_DENIED),
             make_record("github", RESULT_CODE_RATE_LIMITED),
@@ -464,6 +464,8 @@ mod tests {
 
         let markdown = super::render_markdown(&Period::Week, &None, &rows, &total, &events);
 
-        assert!(markdown.contains("No denied, rate-limited, cost-limited, or injection-blocked calls"));
+        assert!(
+            markdown.contains("No denied, rate-limited, cost-limited, or injection-blocked calls")
+        );
     }
 }
