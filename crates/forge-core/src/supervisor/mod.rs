@@ -541,15 +541,25 @@ pub fn logs_dir_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("logs"))
 }
 
+/// Returns the raw `FORGE_HOME` override if set to a non-blank value,
+/// else `None`. Shared by `forge_home_dir` (which also falls back to
+/// `$HOME/.forge`) and the keychain service name in `config::secret`, so
+/// both stay in sync on what counts as "FORGE_HOME is active".
+pub(crate) fn forge_home_override() -> Option<String> {
+    let raw = env::var("FORGE_HOME").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
 fn forge_home_dir() -> Result<PathBuf> {
     // FORGE_HOME lets tests (and advanced users) redirect all forge data without
     // touching HOME, which is unsafe to mutate in a multithreaded process.
-    if let Ok(forge_home) = env::var("FORGE_HOME") {
-        let trimmed = forge_home.trim();
-        if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed));
-        }
-        // Empty or whitespace-only FORGE_HOME is treated as unset; fall back to HOME.
+    if let Some(dir) = forge_home_override() {
+        return Ok(PathBuf::from(dir));
     }
     let home = env::var("HOME").context("HOME environment variable is not set")?;
     Ok(PathBuf::from(home).join(".forge"))
@@ -693,5 +703,52 @@ impl ServerHealth {
                 transport: None,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::forge_home_override;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serializes tests that mutate `FORGE_HOME`. Mirrors the convention in
+    /// `crates/forge-core/tests/supervisor.rs` — a private lock per test
+    /// binary, since `std::env::set_var` is `unsafe` in Rust >= 1.80 and
+    /// this test binary runs tests in parallel threads by default.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn forge_home_override_returns_none_when_unset() {
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: serialized by env_lock(); FORGE_HOME is Forge-private
+        // and not read by any system library.
+        unsafe { std::env::remove_var("FORGE_HOME") };
+        assert_eq!(forge_home_override(), None);
+    }
+
+    #[test]
+    fn forge_home_override_returns_none_when_blank() {
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: serialized by env_lock().
+        unsafe { std::env::set_var("FORGE_HOME", "   ") };
+        assert_eq!(forge_home_override(), None);
+        // SAFETY: serialized by env_lock().
+        unsafe { std::env::remove_var("FORGE_HOME") };
+    }
+
+    #[test]
+    fn forge_home_override_returns_trimmed_value_when_set() {
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: serialized by env_lock().
+        unsafe { std::env::set_var("FORGE_HOME", "  /tmp/client-a  ") };
+        assert_eq!(
+            forge_home_override(),
+            Some("/tmp/client-a".to_owned())
+        );
+        // SAFETY: serialized by env_lock().
+        unsafe { std::env::remove_var("FORGE_HOME") };
     }
 }
