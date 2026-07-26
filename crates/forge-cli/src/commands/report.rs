@@ -6,7 +6,7 @@ use forge_core::config::ForgeConfig;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum Period {
@@ -31,6 +31,13 @@ pub struct Report {
 
     #[arg(long, default_value_t = OutputFormat::Text, value_enum)]
     pub format: OutputFormat,
+
+    #[arg(
+        long,
+        default_value = "forge.toml",
+        help = "Path to the forge config file (used to look up estimated per-call costs)"
+    )]
+    pub config: PathBuf,
 }
 
 impl Report {
@@ -53,7 +60,7 @@ impl Report {
             .query_events(query, None)
             .context("failed to query audit events")?;
 
-        let cost_per_server = load_cost_map();
+        let cost_per_server = load_cost_map(&self.config);
 
         let rows = summarize_events(&events, &cost_per_server);
         let total = summarize_totals(&rows, &events);
@@ -121,9 +128,8 @@ struct ReportRow {
     cost: f64,
 }
 
-fn load_cost_map() -> HashMap<String, f64> {
-    let path = PathBuf::from("forge.toml");
-    let Ok(cfg) = ForgeConfig::load_from_file(&path) else {
+fn load_cost_map(config_path: &Path) -> HashMap<String, f64> {
+    let Ok(cfg) = ForgeConfig::load_from_file(config_path) else {
         return HashMap::new();
     };
     cfg.server
@@ -240,4 +246,44 @@ fn daily_counts(events: &[forge_core::audit::AuditRecord]) -> BTreeMap<String, u
 fn bar(value: usize, width: usize) -> String {
     let normalized = std::cmp::min(value, width);
     "=".repeat(normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_cost_map;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "mcp_forge_report_test_{}_{}",
+            name,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn load_cost_map_reads_from_given_config_path() {
+        let path = unique_temp_path("cost_map");
+        std::fs::write(
+            &path,
+            "[server.github]\ncmd = \"true\"\nestimated_cost_per_call_usd = 0.02\n",
+        )
+        .unwrap();
+
+        let map = load_cost_map(&path);
+
+        assert_eq!(map.get("github"), Some(&0.02));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_cost_map_returns_empty_map_when_config_missing() {
+        let path = unique_temp_path("missing_cost_map");
+        let map = load_cost_map(&path);
+        assert!(map.is_empty());
+    }
 }
