@@ -6,7 +6,10 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use forge_core::audit::AuditReader;
+use forge_core::audit::{
+    AuditReader, RESULT_CODE_COST_LIMITED, RESULT_CODE_INJECTION_BLOCKED,
+    RESULT_CODE_POLICY_DENIED, RESULT_CODE_RATE_LIMITED,
+};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -469,10 +472,17 @@ impl App {
                         new_events.retain(|e| e.result_code != 0);
                     }
                     StatusFilter::Denials => {
-                        new_events.retain(|e| e.result_code == -403);
+                        new_events.retain(|e| e.result_code == RESULT_CODE_POLICY_DENIED);
                     }
                     StatusFilter::Blocked => {
-                        new_events.retain(|e| e.result_code == -32002);
+                        new_events.retain(|e| {
+                            matches!(
+                                e.result_code,
+                                RESULT_CODE_INJECTION_BLOCKED
+                                    | RESULT_CODE_RATE_LIMITED
+                                    | RESULT_CODE_COST_LIMITED
+                            )
+                        });
                     }
                 }
 
@@ -795,11 +805,22 @@ impl App {
     fn render_stats(&self, f: &mut Frame, area: Rect) {
         let total = self.events.len();
         let errors = self.events.iter().filter(|e| e.result_code != 0).count();
-        let denials = self.events.iter().filter(|e| e.result_code == -403).count();
+        let denials = self
+            .events
+            .iter()
+            .filter(|e| e.result_code == RESULT_CODE_POLICY_DENIED)
+            .count();
         let blocked = self
             .events
             .iter()
-            .filter(|e| e.result_code == -32002)
+            .filter(|e| {
+                matches!(
+                    e.result_code,
+                    RESULT_CODE_INJECTION_BLOCKED
+                        | RESULT_CODE_RATE_LIMITED
+                        | RESULT_CODE_COST_LIMITED
+                )
+            })
             .count();
 
         // Latency distribution.
@@ -1163,23 +1184,23 @@ fn format_timestamp(ms: i64) -> String {
 fn status_span(code: i32) -> Span<'static> {
     match code {
         0 => Span::styled("ok", Style::default().fg(Color::Green)),
-        -403 => Span::styled(
+        RESULT_CODE_POLICY_DENIED => Span::styled(
             "denied",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        -32002 => Span::styled(
+        RESULT_CODE_INJECTION_BLOCKED => Span::styled(
             "blocked",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
-        -32000 => Span::styled(
+        RESULT_CODE_RATE_LIMITED => Span::styled(
             "rate-limited",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        -32003 => Span::styled(
+        RESULT_CODE_COST_LIMITED => Span::styled(
             "cost-limited",
             Style::default()
                 .fg(Color::Yellow)
@@ -1384,24 +1405,33 @@ mod tests {
             make_record("s", "t", 0, 10, 1000),
             make_record("s", "t", -403, 10, 1001),
             make_record("s", "t", -32002, 10, 1002),
+            make_record("s", "t", -32000, 10, 1003),
+            make_record("s", "t", -32003, 10, 1004),
         ];
         let mut filtered = events.clone();
-        filtered.retain(|e| e.result_code == -403);
+        filtered.retain(|e| e.result_code == RESULT_CODE_POLICY_DENIED);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].result_code, -403);
     }
 
     #[test]
-    fn status_filter_blocked_keeps_32002() {
+    fn status_filter_blocked_keeps_injection_rate_and_cost_codes() {
         let events = vec![
             make_record("s", "t", 0, 10, 1000),
             make_record("s", "t", -403, 10, 1001),
             make_record("s", "t", -32002, 10, 1002),
+            make_record("s", "t", -32000, 10, 1003),
+            make_record("s", "t", -32003, 10, 1004),
         ];
         let mut filtered = events.clone();
-        filtered.retain(|e| e.result_code == -32002);
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].result_code, -32002);
+        filtered.retain(|e| {
+            matches!(
+                e.result_code,
+                RESULT_CODE_INJECTION_BLOCKED | RESULT_CODE_RATE_LIMITED | RESULT_CODE_COST_LIMITED
+            )
+        });
+        assert_eq!(filtered.len(), 3);
+        assert!(filtered.iter().all(|e| e.result_code != -403));
     }
 
     // sort mode
