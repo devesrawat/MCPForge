@@ -34,6 +34,12 @@ pub struct Add {
         help = "Path to the forge config file"
     )]
     pub config: PathBuf,
+
+    #[arg(
+        long,
+        help = "Apply a curated safe-defaults deny_tools preset (available: github, filesystem)"
+    )]
+    pub preset: Option<String>,
 }
 
 impl Add {
@@ -59,7 +65,7 @@ impl Add {
         }
 
         let transport = parse_transport(&self.transport)?;
-        let server = ServerConfig {
+        let mut server = ServerConfig {
             cmd: self.cmd.clone(),
             transport,
             url: self.url.clone(),
@@ -76,6 +82,18 @@ impl Add {
         };
 
         validate_server_transport(&self.name, &server).map_err(|e| anyhow::anyhow!("{}", e.0))?;
+
+        if let Some(preset_name) = &self.preset {
+            let deny_tools =
+                forge_core::config::preset_deny_tools(preset_name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown preset '{}'; available presets: {}",
+                        preset_name,
+                        forge_core::config::known_presets().join(", ")
+                    )
+                })?;
+            server.deny_tools = deny_tools.iter().map(|s| s.to_string()).collect();
+        }
 
         cfg.server.insert(self.name.clone(), server);
 
@@ -110,12 +128,23 @@ mod tests {
     use tempfile::TempDir;
 
     fn add(name: &str, cmd: Option<&str>, transport: &str, url: Option<&str>) -> Add {
+        add_with_preset(name, cmd, transport, url, None)
+    }
+
+    fn add_with_preset(
+        name: &str,
+        cmd: Option<&str>,
+        transport: &str,
+        url: Option<&str>,
+        preset: Option<&str>,
+    ) -> Add {
         Add {
             name: name.to_owned(),
             transport: transport.to_owned(),
             cmd: cmd.map(str::to_owned),
             url: url.map(str::to_owned),
             config: PathBuf::from("forge.toml"),
+            preset: preset.map(str::to_owned),
         }
     }
 
@@ -133,6 +162,7 @@ mod tests {
             cmd: Some("echo hello".to_owned()),
             url: None,
             config: custom_path.clone(),
+            preset: None,
         };
         cmd.run_at_config(&custom_path).unwrap();
         assert!(custom_path.exists(), "config written to custom path");
@@ -253,5 +283,75 @@ mod tests {
         assert!(!text.contains("allowed_tools"));
         assert!(!text.contains("transport = \"stdio\""));
         assert!(!text.contains("[server.srv.secret]"));
+    }
+
+    #[test]
+    fn applies_github_preset_deny_tools() {
+        let dir = TempDir::new().unwrap();
+        run_add_in(
+            dir.path(),
+            &add_with_preset(
+                "gh",
+                Some("npx -y @modelcontextprotocol/server-github"),
+                "stdio",
+                None,
+                Some("github"),
+            ),
+        )
+        .unwrap();
+        let cfg = ForgeConfig::load_from_file(dir.path().join("forge.toml")).unwrap();
+        assert_eq!(
+            cfg.server["gh"].deny_tools,
+            forge_core::config::preset_deny_tools("github")
+                .unwrap()
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn applies_filesystem_preset_deny_tools() {
+        let dir = TempDir::new().unwrap();
+        run_add_in(
+            dir.path(),
+            &add_with_preset(
+                "fs",
+                Some("npx -y @modelcontextprotocol/server-filesystem /tmp"),
+                "stdio",
+                None,
+                Some("filesystem"),
+            ),
+        )
+        .unwrap();
+        let cfg = ForgeConfig::load_from_file(dir.path().join("forge.toml")).unwrap();
+        assert_eq!(
+            cfg.server["fs"].deny_tools,
+            forge_core::config::preset_deny_tools("filesystem")
+                .unwrap()
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_preset_name() {
+        let dir = TempDir::new().unwrap();
+        let err = run_add_in(
+            dir.path(),
+            &add_with_preset("srv", Some("cmd"), "stdio", None, Some("postgres")),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("unknown preset"));
+        assert!(message.contains("github"));
+        assert!(message.contains("filesystem"));
+    }
+
+    #[test]
+    fn no_preset_leaves_deny_tools_empty_and_unserialized() {
+        let dir = TempDir::new().unwrap();
+        run_add_in(dir.path(), &add("srv", Some("echo hello"), "stdio", None)).unwrap();
+        let cfg = ForgeConfig::load_from_file(dir.path().join("forge.toml")).unwrap();
+        assert!(cfg.server["srv"].deny_tools.is_empty());
+        let text = std::fs::read_to_string(dir.path().join("forge.toml")).unwrap();
+        assert!(!text.contains("deny_tools"));
     }
 }
