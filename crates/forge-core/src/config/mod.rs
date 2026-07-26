@@ -102,6 +102,14 @@ pub struct GuardConfig {
         skip_serializing_if = "is_default_injection_mode"
     )]
     pub injection_mode: String,
+
+    /// Destructive tool-name/argument pattern handling mode: "warn" or
+    /// "block". Gated by `enabled`, same as `injection_mode`.
+    #[serde(
+        default = "default_destructive_pattern_mode",
+        skip_serializing_if = "is_default_destructive_pattern_mode"
+    )]
+    pub destructive_pattern_mode: String,
 }
 
 fn default_guard_enabled() -> bool {
@@ -112,11 +120,20 @@ fn default_injection_mode() -> String {
     "block".to_owned()
 }
 
+fn is_default_destructive_pattern_mode(mode: &str) -> bool {
+    mode == default_destructive_pattern_mode()
+}
+
+fn default_destructive_pattern_mode() -> String {
+    "block".to_owned()
+}
+
 impl Default for GuardConfig {
     fn default() -> Self {
         Self {
             enabled: default_guard_enabled(),
             injection_mode: default_injection_mode(),
+            destructive_pattern_mode: default_destructive_pattern_mode(),
         }
     }
 }

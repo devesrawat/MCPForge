@@ -27,6 +27,33 @@ cmd = "echo status"
 }
 
 #[test]
+fn guard_destructive_pattern_mode_defaults_to_block() {
+    let cfg = ForgeConfig::parse_str(
+        r#"
+[server.test]
+cmd = "true"
+"#,
+    )
+    .expect("config parse");
+    assert_eq!(cfg.guard.destructive_pattern_mode, "block");
+}
+
+#[test]
+fn guard_destructive_pattern_mode_can_be_set_to_warn() {
+    let cfg = ForgeConfig::parse_str(
+        r#"
+[guard]
+destructive_pattern_mode = "warn"
+
+[server.test]
+cmd = "true"
+"#,
+    )
+    .expect("config parse");
+    assert_eq!(cfg.guard.destructive_pattern_mode, "warn");
+}
+
+#[test]
 fn reject_invalid_glob() {
     let manifest = r#"
 [server.x]
