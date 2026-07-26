@@ -1173,6 +1173,18 @@ fn status_span(code: i32) -> Span<'static> {
             "blocked",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
+        -32000 => Span::styled(
+            "rate-limited",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        -32003 => Span::styled(
+            "cost-limited",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         -1 => Span::styled(
             "error",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -1253,6 +1265,16 @@ mod tests {
     #[test]
     fn status_blocked() {
         assert_eq!(status_span(-32002).content.to_string(), "blocked");
+    }
+
+    #[test]
+    fn status_rate_limited() {
+        assert_eq!(status_span(-32000).content.to_string(), "rate-limited");
+    }
+
+    #[test]
+    fn status_cost_limited() {
+        assert_eq!(status_span(-32003).content.to_string(), "cost-limited");
     }
 
     #[test]
