@@ -7,8 +7,8 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use forge_core::audit::{
-    AuditReader, RESULT_CODE_COST_LIMITED, RESULT_CODE_INJECTION_BLOCKED,
-    RESULT_CODE_POLICY_DENIED, RESULT_CODE_RATE_LIMITED,
+    AuditReader, RESULT_CODE_COST_LIMITED, RESULT_CODE_DESTRUCTIVE_BLOCKED,
+    RESULT_CODE_INJECTION_BLOCKED, RESULT_CODE_POLICY_DENIED, RESULT_CODE_RATE_LIMITED,
 };
 use ratatui::{
     Frame, Terminal,
@@ -481,6 +481,7 @@ impl App {
                                 RESULT_CODE_INJECTION_BLOCKED
                                     | RESULT_CODE_RATE_LIMITED
                                     | RESULT_CODE_COST_LIMITED
+                                    | RESULT_CODE_DESTRUCTIVE_BLOCKED
                             )
                         });
                     }
@@ -819,6 +820,7 @@ impl App {
                     RESULT_CODE_INJECTION_BLOCKED
                         | RESULT_CODE_RATE_LIMITED
                         | RESULT_CODE_COST_LIMITED
+                        | RESULT_CODE_DESTRUCTIVE_BLOCKED
                 )
             })
             .count();
@@ -1206,6 +1208,10 @@ fn status_span(code: i32) -> Span<'static> {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
+        RESULT_CODE_DESTRUCTIVE_BLOCKED => Span::styled(
+            "destructive",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
         -1 => Span::styled(
             "error",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -1296,6 +1302,11 @@ mod tests {
     #[test]
     fn status_cost_limited() {
         assert_eq!(status_span(-32003).content.to_string(), "cost-limited");
+    }
+
+    #[test]
+    fn status_destructive_blocked() {
+        assert_eq!(status_span(-32004).content.to_string(), "destructive");
     }
 
     #[test]
@@ -1415,22 +1426,26 @@ mod tests {
     }
 
     #[test]
-    fn status_filter_blocked_keeps_injection_rate_and_cost_codes() {
+    fn status_filter_blocked_keeps_injection_rate_cost_and_destructive_codes() {
         let events = vec![
             make_record("s", "t", 0, 10, 1000),
             make_record("s", "t", -403, 10, 1001),
             make_record("s", "t", -32002, 10, 1002),
             make_record("s", "t", -32000, 10, 1003),
             make_record("s", "t", -32003, 10, 1004),
+            make_record("s", "t", -32004, 10, 1005),
         ];
         let mut filtered = events.clone();
         filtered.retain(|e| {
             matches!(
                 e.result_code,
-                RESULT_CODE_INJECTION_BLOCKED | RESULT_CODE_RATE_LIMITED | RESULT_CODE_COST_LIMITED
+                RESULT_CODE_INJECTION_BLOCKED
+                    | RESULT_CODE_RATE_LIMITED
+                    | RESULT_CODE_COST_LIMITED
+                    | RESULT_CODE_DESTRUCTIVE_BLOCKED
             )
         });
-        assert_eq!(filtered.len(), 3);
+        assert_eq!(filtered.len(), 4);
         assert!(filtered.iter().all(|e| e.result_code != -403));
     }
 

@@ -152,6 +152,7 @@ fn denial_reason(result_code: i32) -> Option<&'static str> {
         forge_core::audit::RESULT_CODE_RATE_LIMITED => Some("rate-limited"),
         forge_core::audit::RESULT_CODE_COST_LIMITED => Some("cost-limited"),
         forge_core::audit::RESULT_CODE_INJECTION_BLOCKED => Some("injection-blocked"),
+        forge_core::audit::RESULT_CODE_DESTRUCTIVE_BLOCKED => Some("destructive-blocked"),
         _ => None,
     }
 }
@@ -226,7 +227,7 @@ fn render_markdown(
     let denials = denial_counts(events);
     if denials.is_empty() {
         out.push_str(
-            "No denied, rate-limited, cost-limited, or injection-blocked calls in this period.\n",
+            "No denied, rate-limited, cost-limited, injection-blocked, or destructive-pattern-blocked calls in this period.\n",
         );
     } else {
         out.push_str("| Server | Reason | Count |\n");
@@ -405,10 +406,10 @@ mod tests {
     }
 
     #[test]
-    fn filter_executed_events_drops_all_four_denial_reasons() {
+    fn filter_executed_events_drops_all_five_denial_reasons() {
         use forge_core::audit::{
-            RESULT_CODE_COST_LIMITED, RESULT_CODE_INJECTION_BLOCKED, RESULT_CODE_POLICY_DENIED,
-            RESULT_CODE_RATE_LIMITED,
+            RESULT_CODE_COST_LIMITED, RESULT_CODE_DESTRUCTIVE_BLOCKED,
+            RESULT_CODE_INJECTION_BLOCKED, RESULT_CODE_POLICY_DENIED, RESULT_CODE_RATE_LIMITED,
         };
         let events = vec![
             make_record("github", 0),  // success, kept
@@ -417,6 +418,7 @@ mod tests {
             make_record("github", RESULT_CODE_RATE_LIMITED),
             make_record("github", RESULT_CODE_COST_LIMITED),
             make_record("github", RESULT_CODE_INJECTION_BLOCKED),
+            make_record("github", RESULT_CODE_DESTRUCTIVE_BLOCKED),
         ];
 
         let executed = super::filter_executed_events(&events);
@@ -432,8 +434,8 @@ mod tests {
     #[test]
     fn denial_counts_groups_by_server_and_reason() {
         use forge_core::audit::{
-            RESULT_CODE_COST_LIMITED, RESULT_CODE_INJECTION_BLOCKED, RESULT_CODE_POLICY_DENIED,
-            RESULT_CODE_RATE_LIMITED,
+            RESULT_CODE_COST_LIMITED, RESULT_CODE_DESTRUCTIVE_BLOCKED,
+            RESULT_CODE_INJECTION_BLOCKED, RESULT_CODE_POLICY_DENIED, RESULT_CODE_RATE_LIMITED,
         };
         let events = vec![
             make_record("github", 0),  // success, not a denial
@@ -443,6 +445,7 @@ mod tests {
             make_record("github", RESULT_CODE_RATE_LIMITED),
             make_record("postgres", RESULT_CODE_COST_LIMITED),
             make_record("postgres", RESULT_CODE_INJECTION_BLOCKED),
+            make_record("postgres", RESULT_CODE_DESTRUCTIVE_BLOCKED),
         ];
 
         let counts = super::denial_counts(&events);
@@ -463,7 +466,11 @@ mod tests {
             counts.get(&("postgres".to_string(), "injection-blocked")),
             Some(&1)
         );
-        assert_eq!(counts.len(), 4);
+        assert_eq!(
+            counts.get(&("postgres".to_string(), "destructive-blocked")),
+            Some(&1)
+        );
+        assert_eq!(counts.len(), 5);
     }
 
     #[test]
@@ -506,8 +513,8 @@ mod tests {
 
         let markdown = super::render_markdown(&Period::Week, &None, &rows, &total, &events);
 
-        assert!(
-            markdown.contains("No denied, rate-limited, cost-limited, or injection-blocked calls")
-        );
+        assert!(markdown.contains(
+            "No denied, rate-limited, cost-limited, injection-blocked, or destructive-pattern-blocked calls"
+        ));
     }
 }
