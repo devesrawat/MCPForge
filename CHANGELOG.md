@@ -7,6 +7,20 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- Keychain secrets now scope to the active `FORGE_HOME` override
+  (`mcp-forge:<forge_home>` instead of a single global `mcp-forge`
+  service), so different clients run with different `FORGE_HOME` values
+  no longer collide on the same OS keychain entry. Secrets stored before
+  this change (under the default, unscoped `FORGE_HOME`) continue to
+  resolve unchanged.
+- `forge report`: added a `--config` flag (matching `forge start`/`forge
+  check`); the per-call cost map is now read from the config actually in
+  use instead of a hardcoded `forge.toml` in the current directory.
+
 ## [0.1.2] — 2026-06-21
 
 ### Fixed
