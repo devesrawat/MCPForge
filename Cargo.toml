@@ -41,7 +41,7 @@ tokio = { version = "1", features = ["rt", "macros", "process", "signal", "time"
 tokio-util = "0.7"
 axum = "0.8"
 tower = { version = "0.5", features = ["full"] }
-tower-http = { version = "0.6", features = ["timeout", "limit"] }
+tower-http = { version = "0.7", features = ["timeout", "limit"] }
 hyper = "1"
 shell-words = "1.1"
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -58,7 +58,7 @@ globset = "0.4"
 dialoguer = "0.12"
 rpassword = "7"
 futures = "0.3"
-rmcp = { version = "1.7", default-features = false, features = [
+rmcp = { version = "2.2", default-features = false, features = [
     "client",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
@@ -68,7 +68,7 @@ subtle = "2"
 tempfile = "3"
 proptest = "1"
 which = "8"
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 csv = "1.3"
 
